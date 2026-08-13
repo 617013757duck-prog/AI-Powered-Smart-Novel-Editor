@@ -1,0 +1,36 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.iml
+
+# ===== 运行时数据（含私密内容：小说、API密钥、向量库、模型），禁止提交 =====
+data/
+logs/
+models/
+tools/
+
+# ===== 调试 / 临时 / 测试文件 =====
+debug_*.py
+test_*.py
+_recode_bats.py
+test_*.txt
+*.log
+0
+3.8
+3.8)
+DeepSeek
+Ollama
+dry-run
+proceeding
+skip
+
+# ===== 系统 =====
+Thumbs.db
+.DS_Store

@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI小说精修工作台 · TriModel Novel Studio</title>
+<link rel="stylesheet" href="/css/style.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/eclipse.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-ocean.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/runmode/runmode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js"></script>
+</head>
+<body>
+<div id="app">
+  <!-- 顶部栏 -->
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">📖</span>
+      <div class="brand-text">
+        <div class="title">AI 小说精修工作台</div>
+        <div class="subtitle">Writer · Reviewer · Chat 三模态协作 &nbsp;·&nbsp; ChromaDB 全书记忆</div>
+      </div>
+    </div>
+    <div class="status-pill" id="statusPill">
+      <span class="dot"></span>
+      <span id="statusText">未连接</span>
+    </div>
+    <div class="actions">
+      <div class="provider-toggle" id="providerToggle" title="切换AI供应商">
+        <span class="pt-label">AI:</span>
+        <button id="btnProviderLocal" class="pt-btn active" data-provider="local">🖥️ 本地</button>
+        <button id="btnProviderExternal" class="pt-btn" data-provider="external">🌐 外部</button>
+      </div>
+      <button id="btnImport" class="btn btn-default"><i>📂</i> 导入TXT</button>
+      <input type="file" id="fileInput" accept=".txt" style="display:none" />
+      <button id="btnExport" class="btn btn-default"><i>💾</i> 导出修改版</button>
+      <button id="btnFullscreen" class="btn btn-default"><i>🖥️</i> 专注模式</button>
+      <button id="btnSettings" class="btn btn-primary"><i>⚙️</i> 设置</button>
+    </div>
+  </header>
+
+  <div id="main">
+    <!-- 左侧：小说/章节 -->
+    <aside id="leftPane" class="pane">
+      <div class="section-head">
+        <h3>📚 小说</h3>
+        <select id="novelSelect"></select>
+        <button id="btnDeleteNovel" class="btn btn-xs btn-warn" title="删除当前选中的小说" style="margin-left:4px;flex-shrink:0">🗑️</button>
+      </div>
+      <div id="novelMeta" class="meta-box"></div>
+
+      <div class="section-head">
+        <h3>📑 章节目录</h3>
+      </div>
+      <div class="search-wrap">
+        <input id="chapterSearch" placeholder="搜索章节标题 / 序号" />
+      </div>
+      <div id="tocList" class="toc-list"></div>
+
+      <div class="section-head">
+        <h3>🧠 向量记忆</h3>
+        <span id="memStats" class="tag tag-info">0 块</span>
+      </div>
+      <div class="mem-opts">
+        <input id="memQuery" placeholder="输入关键词，在全书中智能检索..." />
+        <button id="btnMemQuery" class="btn btn-default btn-sm">检索</button>
+      </div>
+      <div id="memResults" class="mem-results">
+        <div class="mem-empty">输入关键词后，AI 将自动关联相关设定、伏笔、人物关系。</div>
+      </div>
+
+      <!-- 文本检索（纯代码） -->
+      <div class="section-head">
+        <h3>🔍 文本检索</h3>
+      </div>
+      <div class="search-wrap">
+        <input id="textSearchKw" placeholder="输入词汇，纯文本检索出现在哪些章节..." />
+        <button id="btnTextSearch" class="btn btn-default btn-sm">检索</button>
+      </div>
+      <div class="ts-range">
+        <input id="tsStart" type="number" min="1" placeholder="起始章" />
+        <span>—</span>
+        <input id="tsEnd" type="number" min="1" placeholder="结束章" />
+      </div>
+      <div id="textSearchResults" class="mem-results">
+        <div class="mem-empty">输入关键词后，将列出所有包含该词的章节及上下文，点击可跳转。</div>
+      </div>
+
+      <!-- 文本查找替换 -->
+      <div class="section-head">
+        <h3>✂️ 查找替换</h3>
+      </div>
+      <div class="replace-panel">
+        <input id="repFind" placeholder="查找文本..." />
+        <input id="repReplace" placeholder="替换为（留空=删除该文本）..." />
+        <div class="ts-range">
+          <input id="repStart" type="number" min="1" placeholder="起始章" />
+          <span>—</span>
+          <input id="repEnd" type="number" min="1" placeholder="结束章" />
+          <button id="btnRepAll" class="btn btn-xs btn-default">全部</button>
+        </div>
+        <div class="bulk-actions">
+          <button id="btnRepPreview" class="btn btn-sm btn-default">🔍 预览命中</button>
+          <button id="btnRepExec" class="btn btn-sm btn-warn">⚡ 执行替换</button>
+        </div>
+        <div id="repResults" class="mem-results" style="min-height:90px;max-height:190px">
+          <div class="mem-empty">输入查找与替换文本，先「预览命中」确认范围，再「执行替换」。替换后自动同步向量记忆。</div>
+        </div>
+      </div>
+
+      <!-- 总体设定修改 -->
+      <div class="section-head">
+        <h3>🛠️ 总体设定修改</h3>
+        <button id="btnBulkHistory" class="btn btn-xs btn-default" title="查看历史修改记录">📜 历史</button>
+      </div>
+      <div class="bulk-panel">
+        <div class="bulk-mode">
+          <label title="只有正文出现关键词的章节才会被AI修改"><input type="radio" name="bulkMode" value="keyword" checked /> 关键词触发</label>
+          <label title="范围内所有章节都交给AI逐章阅读，由AI自行判断是否需要修改"><input type="radio" name="bulkMode" value="all" /> 全章节逐章（AI自判）</label>
+        </div>
+        <input id="bulkKeywords" placeholder="关键词（逗号分隔），如：哥斯拉,金手指；全章节模式下可留空" />
+        <div class="bulk-range">
+          <input id="bulkRangeStart" type="number" min="1" placeholder="起始章" />
+          <span>—</span>
+          <input id="bulkRangeEnd" type="number" min="1" placeholder="结束章" />
+          <button id="btnBulkRangeAll" class="btn btn-xs btn-default" title="设置为全部章节">全部</button>
+        </div>
+        <textarea id="bulkInstruction" rows="3" placeholder="修改要求，如：将主角的佩剑统一改名为「霜月」，并补充相关描写"></textarea>
+        <div class="bulk-actions">
+          <button id="btnBulkStart" class="btn btn-sm btn-primary">▶ 开始修改</button>
+          <button id="btnBulkStop" class="btn btn-sm btn-warn" disabled>⏹ 停止</button>
+        </div>
+        <div class="bulk-actions" style="margin-top:4px">
+          <button id="btnBulkConfirm" class="btn btn-sm btn-primary" disabled>✅ 保留全部修改</button>
+          <button id="btnBulkDiscard" class="btn btn-sm btn-warn" disabled>🗑️ 放弃修改</button>
+        </div>
+        <div class="bulk-progress" id="bulkProgress" style="display:none">
+          <div class="study-bar-wrap">
+            <div class="study-bar-fill" id="bulkBar"></div>
+            <div class="study-bar-text" id="bulkBarText">0%</div>
+          </div>
+          <div class="study-info" id="bulkInfo">就绪</div>
+        </div>
+        <div class="bulk-list-head">已修改章节（待确认）：</div>
+        <div class="bulk-list-toolbar" id="bulkListToolbar" style="display:none">
+          <label class="blt-all"><input type="checkbox" id="bulkSelAll" /> 全选</label>
+          <button id="btnBulkConfirmSel" class="btn btn-xs btn-primary">✅ 保留选中</button>
+          <button id="btnBulkDiscardSel" class="btn btn-xs btn-warn">🗑 放弃选中</button>
+          <span id="bulkSelCount" class="blt-count">0 章</span>
+        </div>
+        <div id="bulkModList" class="bulk-mod-list">
+          <div class="mem-empty">尚未执行总体设定修改。选择「关键词触发」或「全章节逐章」模式，设置章节范围与修改要求后点击「开始修改」。</div>
+        </div>
+      </div>
+
+      <!-- 读书模式 -->
+      <div class="section-head">
+        <h3>📖 读书模式</h3>
+        <button id="btnToggleStudySel" class="btn btn-xs btn-default" title="选取要阅读的章节">📋 选取章节</button>
+      </div>
+      <div class="study-panel">
+        <div class="study-actions">
+          <button id="btnStudyStart" class="btn btn-sm btn-primary" title="AI逐章阅读并自动提取设定">▶ 开始读书</button>
+          <button id="btnStudyStop" class="btn btn-sm btn-warn" disabled>⏹ 停止</button>
+        </div>
+        <div class="study-progress" id="studyProgress" style="display:none">
+          <div class="study-bar-wrap">
+            <div class="study-bar-fill" id="studyBar"></div>
+            <div class="study-bar-text" id="studyBarText">0%</div>
+          </div>
+          <div class="study-info" id="studyInfo">就绪</div>
+        </div>
+        <div class="study-ch-sel" id="studyChSel" style="display:none">
+          <div class="study-ch-hint">勾选要阅读的章节（留空=全部）：</div>
+          <div class="study-ch-actions">
+            <button id="btnStudySelAll" class="btn btn-xs btn-default">全选</button>
+            <button id="btnStudySelNone" class="btn btn-xs btn-default">取消全选</button>
+            <button id="btnStudySelConfirm" class="btn btn-xs btn-primary">确认</button>
+          </div>
+        </div>
+        <div class="study-range">
+          <input id="studyRangeInput" placeholder="按数字选章，如：1-50, 60, 70-80" />
+          <button id="btnStudyRangeApply" class="btn btn-xs btn-default">应用范围</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 中间：编辑器 -->
+    <section id="centerPane" class="pane center">
+      <div class="editor-toolbar">
+        <div class="view-tabs">
+          <button class="vt active" data-mode="card"><span class="vt-ic">🃏</span>卡片对比</button>
+          <button class="vt" data-mode="full"><span class="vt-ic">📝</span>全文模式</button>
+          <button class="vt" data-mode="diff"><span class="vt-ic">📊</span>章节对比</button>
+        </div>
+        <div class="chapter-title-wrap">
+          <div class="chapter-title" id="curChapterTitle">← 请从左侧选择一本小说与章节</div>
+          <button id="btnEditChapterTitle" class="btn btn-xs btn-default" title="修改本章名称" style="display:none">✏️</button>
+        </div>
+        <div class="editor-ops">
+          <button id="btnReview" class="btn btn-warn"><i>🔍</i> 审校本章</button>
+          <button id="btnReindex" class="btn btn-default btn-sm"><i>🔄</i> 重索引</button>
+          <button id="btnSave" class="btn btn-primary"><i>💾</i> 保存本章</button>
+        </div>
+      </div>
+
+      <!-- 卡片视图 -->
+      <div id="cardView" class="view-pane">
+        <div class="card-head">
+          <div class="ch-col col-idx">☑</div>
+          <div class="ch-col col-idx">#</div>
+          <div class="ch-col col-orig">📖 原文</div>
+          <div class="ch-col col-mod">✨ AI 修改版</div>
+          <div class="ch-col col-op">操作</div>
+        </div>
+        <div id="cardList" class="card-body"></div>
+        <div class="card-foot">
+          <button id="btnAddCard" class="btn btn-default btn-sm">➕ 插入新段落</button>
+          <span class="hint">提示：点击卡片空白处可选中；底部输入修改要求后，可对选中段落或整章执行 AI 改写。</span>
+        </div>
+      </div>
+
+      <!-- 全文模式 -->
+      <div id="fullView" class="view-pane" style="display:none">
+        <div class="dual-ed">
+          <div class="ed-col">
+            <div class="ed-label">📖 原文（只读）</div>
+            <textarea id="origEditor"></textarea>
+          </div>
+          <div class="ed-col">
+            <div class="ed-label">✨ 修改版（可编辑）</div>
+            <textarea id="modEditor"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- 章节对比 -->
+      <div id="diffView" class="view-pane" style="display:none">
+        <div class="diff-wrap">
+          <div class="ed-label">🔎 原文 vs 修改版 · 差异视图</div>
+          <textarea id="diffEditor"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右侧 -->
+    <aside id="rightPane" class="pane right">
+      <div class="side-tabs">
+        <button class="st active" data-tab="agent"><i>✍️</i> 修改 Agent</button>
+        <button class="st" data-tab="chat"><i>💬</i> Chat 助手</button>
+        <button class="st" data-tab="summary"><i>📊</i> 设定摘要</button>
+      </div>
+
+      <div id="tab-agent" class="side-panel active">
+        <div class="field">
+          <label class="field-label">🌐 全局修改指令（每次改写附加）</label>
+          <textarea id="globalPrompt" rows="4" placeholder="示例：&#10;• 整体文风偏古风，避免现代词&#10;• 节奏紧凑，删除水字数句&#10;• 保留第一人称叙事视角"></textarea>
+          <div class="field-actions" style="margin-top:4px;display:flex;gap:4px;align-items:center">
+            <button class="btn btn-xs btn-default slot-save" data-field="global">💾 保存到槽位</button>
+            <select class="slot-load" data-field="global" style="font-size:11px;height:24px;padding:0 6px"><option value="">📂 读取已存...</option></select>
+            <span class="auto-save-indicator" data-field="global" style="font-size:10px;color:var(--muted);margin-left:4px;display:none">已自动保存</span>
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label">🎭 自定义 Writer Agent 设定</label>
+          <textarea id="customAgent" rows="3" placeholder="可选：覆盖默认Writer设定，例如：你是一位擅长写权谋文的资深编辑..."></textarea>
+          <div class="field-actions" style="margin-top:4px;display:flex;gap:4px;align-items:center">
+            <button class="btn btn-xs btn-default slot-save" data-field="agent">💾 保存到槽位</button>
+            <select class="slot-load" data-field="agent" style="font-size:11px;height:24px;padding:0 6px"><option value="">📂 读取已存...</option></select>
+            <span class="auto-save-indicator" data-field="agent" style="font-size:10px;color:var(--muted);margin-left:4px;display:none">已自动保存</span>
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label row">
+            <input type="checkbox" id="autoReview" checked />
+            <span>每次改写后自动运行 Reviewer 审校</span>
+          </label>
+        </div>
+        <div class="field">
+          <label class="field-label">🔎 审校结果</label>
+          <div id="reviewBox" class="review-box empty">审校结果将展示在此处，包括 OOC（角色崩坏）、逻辑漏洞、设定冲突、细节错误。</div>
+        </div>
+      </div>
+
+      <div id="tab-chat" class="side-panel">
+        <div id="chatLog" class="chat-log">
+          <div class="chat-empty">
+            <div class="ce-icon">💬</div>
+            <div class="ce-title">小说内容问答助手</div>
+            <div class="ce-tip">你可以问：<br>• "这一章讲了什么？"<br>• "主角第一次出场是在哪？"<br>• "关于那把生锈的剑有什么伏笔？"</div>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <textarea id="chatInput" rows="2" placeholder="输入问题，Ctrl+Enter 发送"></textarea>
+          <button id="btnChatSend" class="btn btn-primary">发送</button>
+        </div>
+      </div>
+
+      <div id="tab-summary" class="side-panel">
+        <div id="settingsSummaryBox" class="settings-summary">
+          <div class="ss-empty">
+            <div class="ss-icon">📖</div>
+            <div class="ss-title">世界书设定</div>
+            <div class="ss-tip">
+              世界书 = 带触发词的设定集（类似酒馆等 AI 平台的 Lorebook）。<br>
+              AI 修改内容时，正文出现条目的「触发词」才会读取对应设定，保证设定正确性。<br>
+              使用「读书模式」或「批量修改」可让 AI 自动提取；也可自行添加、编辑触发词与内容。
+            </div>
+            <button id="btnRefreshSummary" class="btn btn-sm btn-primary" style="margin-top:10px">🔄 刷新世界书</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- AI 改写进度可视化面板（任务启动时自动展开） -->
+  <div id="progressPanel" class="progress-panel" style="display:none">
+    <div class="pp-head">
+      <div class="pp-title">
+        <span class="pp-ic">🚀</span>
+        <span id="ppTitle">整章改写进行中...</span>
+      </div>
+      <div class="pp-head-right">
+        <span id="ppStat" class="tag tag-info">0 / 0 段 (0%)</span>
+        <button id="ppCancel" class="btn btn-xs btn-warn" title="取消当前AI任务并释放资源">✕ 取消</button>
+        <button id="ppToggle" class="icon-btn" title="展开/收起">▾</button>
+      </div>
+    </div>
+    <div class="pp-body">
+      <div class="progress-bar-wrap">
+        <div id="progressBar" class="progress-bar-fill"></div>
+        <div id="progressText" class="progress-bar-text">0%</div>
+      </div>
+      <div class="pp-info-row">
+        <div id="ppCurInfo" class="pp-info-box">
+          <span class="label">当前处理：</span>
+          <span class="value">等待开始...</span>
+        </div>
+        <div id="ppGpuBox" class="pp-info-box gpu">
+          <span class="gpu-dot" id="ppGpuDot"></span>
+          <span class="label">AI 状态：</span>
+          <span class="value" id="ppGpuText">未检测</span>
+        </div>
+      </div>
+      <div class="pp-logs">
+        <div class="pp-log-head">
+          <span>📜 实时生成日志</span>
+          <button id="ppClearLog" class="btn btn-xs btn-default" style="font-size:11px">清空</button>
+        </div>
+        <div id="ppLogContent" class="pp-log-content"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部修改要求 -->
+  <footer id="bottomBar">
+    <div class="bb-info">
+      <div class="bbi-top">
+        <i class="bbi">🔧</i>
+        <div>
+          <div class="bbi-title">当前修改要求</div>
+          <div class="bbi-sub"><span id="selectedSegTag" class="tag tag-muted">未选段落</span></div>
+        </div>
+      </div>
+      <div class="bbi-acts">
+        <button id="btnSaveInstr" class="btn btn-xs btn-default" title="保存当前修改要求到 Prompt 仓库">💾 存模板</button>
+        <button id="btnOpenPrompts" class="btn btn-xs btn-default" title="从 Prompt 仓库应用">📚 取模板</button>
+      </div>
+    </div>
+    <div class="bb-inputs">
+      <select id="quickCmd" class="qc-select">
+        <option value="">🔖 快捷指令</option>
+        <option value="润色本段，使语言更流畅自然，避免AI腔和生硬表达">🎨 润色流畅</option>
+        <option value="扩写这段，增加必要的场景描写、动作细节和心理活动，字数增加约30%">🌱 扩写细节</option>
+        <option value="精简本段，删除水字数的冗余修饰，保留核心剧情和信息">✂️ 精简浓缩</option>
+        <option value="优化这段对话，让对话更符合角色性格，并增加潜台词">💬 对话优化</option>
+        <option value="检查本段的AI腔问题，改得更像真人写作，去除生硬的过渡词">🧹 AI腔清理</option>
+        <option value="根据前文设定和伏笔修正本段，保持剧情与设定一致性">🔗 一致性修正</option>
+      </select>
+      <textarea id="instruction" rows="2" class="ins-text" placeholder="请输入具体修改要求... 例如：把这段改得更有古风韵味；增加主角看到佩剑后的心理活动；扩写两人对峙的场景。"></textarea>
+      <div class="bb-btns">
+        <button id="btnApplyOne" class="btn btn-primary">✨ 改写选中段</button>
+        <button id="btnApplyAll" class="btn btn-warn">🚀 整章批量改写</button>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<!-- 快速应用 Prompt 的小弹窗 -->
+<div id="promptPicker" class="modal" style="display:none;z-index:120">
+  <div class="modal-wrap" style="max-width:720px;width:90vw;max-height:82vh">
+    <div class="modal-head">
+      <h2>📚 Prompt 仓库 · 快速应用</h2>
+      <button id="btnClosePromptPicker" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body" style="flex-direction:column">
+      <div class="ppk-filters">
+        <div class="ppk-cat">
+          <button class="ppk-cat-btn active" data-cat="all">全部</button>
+          <button class="ppk-cat-btn" data-cat="instruction">修改要求</button>
+          <button class="ppk-cat-btn" data-cat="global">全局指令</button>
+          <button class="ppk-cat-btn" data-cat="agent">Agent设定</button>
+        </div>
+        <div class="ppk-search">
+          <input id="ppkKw" placeholder="🔍 搜索标题/内容/标签..." />
+          <select id="ppkTag"><option value="">🏷️ 全部标签</option></select>
+        </div>
+      </div>
+      <div id="ppkList" class="ppk-list"></div>
+      <div style="padding:8px 0;font-size:12px;color:var(--muted);text-align:right">
+        点击「📌 应用」按钮会把 Prompt 内容写入对应输入框（不会覆盖当前内容）。
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 保存为 Prompt 模板的小弹窗 -->
+<div id="promptSaveModal" class="modal" style="display:none;z-index:130">
+  <div class="modal-wrap" style="max-width:520px;width:90vw">
+    <div class="modal-head">
+      <h2>💾 保存为 Prompt 模板</h2>
+      <button id="btnCloseSavePrompt" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body" style="flex-direction:column;gap:12px">
+      <label class="inp">模板标题（必填）
+        <input id="psmTitle" type="text" placeholder="例如：古风权谋润色模板" />
+      </label>
+      <label class="inp">分类
+        <select id="psmCategory">
+          <option value="instruction">📝 修改要求（底部输入框）</option>
+          <option value="global">🌐 全局修改指令</option>
+          <option value="agent">🎭 自定义 Writer Agent 设定</option>
+        </select>
+      </label>
+      <label class="inp">标签（逗号分隔）
+        <input id="psmTags" type="text" placeholder="例如：古风,润色,权谋" />
+      </label>
+      <label class="inp">备注（可选）
+        <input id="psmNote" type="text" placeholder="说明适用场景、注意事项等" />
+      </label>
+      <label class="inp">Prompt 内容
+        <textarea id="psmContent" rows="5"></textarea>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button id="btnCancelSavePrompt" class="btn btn-default">取消</button>
+      <button id="btnConfirmSavePrompt" class="btn btn-primary">确认保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 批量修改历史弹窗 -->
+<div id="bulkHistoryModal" class="modal" style="display:none;z-index:135">
+  <div class="modal-wrap" style="max-width:640px;width:90vw;max-height:82vh">
+    <div class="modal-head">
+      <h2>📜 总体设定修改历史</h2>
+      <button id="btnCloseBulkHistory" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body" style="flex-direction:column">
+      <div id="bulkHistoryList" class="bulk-history-list">
+        <div class="pc-empty">暂无修改历史。完成一次「总体设定修改」并保留后，这里会记录修改的章节范围。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 单章重新修改弹窗 -->
+<div id="reworkModal" class="modal" style="display:none;z-index:145">
+  <div class="modal-wrap" style="max-width:520px;width:90vw">
+    <div class="modal-head">
+      <h2>🔄 重新修改 <span id="reworkChapterLabel" style="font-size:13px;color:var(--muted)"></span></h2>
+      <button id="btnCloseRework" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body" style="flex-direction:column;gap:12px">
+      <label class="inp">新的修改要求（必填）
+        <textarea id="reworkInstruction" rows="4" placeholder="输入对该章的新修改要求..." style="min-height:80px"></textarea>
+      </label>
+      <div style="font-size:11.5px;color:var(--muted);line-height:1.6">
+        AI 将基于原章节与全书上下文重新修改，覆盖该章当前待确认内容。<br>
+        可参考当前「修改要求」输入框或在此输入不同的要求。
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button id="btnCancelRework" class="btn btn-default">取消</button>
+      <button id="btnConfirmRework" class="btn btn-primary">开始重新修改</button>
+    </div>
+  </div>
+</div>
+
+<!-- 世界书条目编辑弹窗 -->
+<div id="wbModal" class="modal" style="display:none;z-index:140">
+  <div class="modal-wrap" style="max-width:560px;width:90vw">
+    <div class="modal-head">
+      <h2>📖 世界书条目</h2>
+      <button id="btnCloseWb" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body" style="flex-direction:column;gap:12px">
+      <div class="two-col">
+        <label class="inp">名称<input id="wbModalName" type="text" placeholder="如：古剑霜月" /></label>
+        <label class="inp">分类
+          <select id="wbModalCat">
+            <option>角色</option><option>种族</option><option>物品</option>
+            <option>世界观</option><option>剧情</option><option>关系</option><option>其他</option>
+          </select>
+        </label>
+      </div>
+      <label class="inp">触发词（逗号/顿号分隔，正文出现即触发）
+        <input id="wbModalKeys" type="text" placeholder="古剑、霜月、雪刃" />
+      </label>
+      <label class="inp">设定内容（供 AI 修改时参考）
+        <textarea id="wbModalContent" rows="6" style="width:100%" placeholder="该设定的完整描述…"></textarea>
+      </label>
+      <label class="inp">首次出现<input id="wbModalFirst" type="text" placeholder="第2章（可选）" /></label>
+    </div>
+    <div class="modal-foot">
+      <button id="btnCancelWb" class="btn btn-default">取消</button>
+      <button id="btnSaveWb" class="btn btn-primary">💾 保存条目</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置弹窗 -->
+<div id="settingsModal" class="modal" style="display:none">
+  <div class="modal-wrap">
+    <div class="modal-head">
+      <h2>⚙️ 设置 · 接入本地 AI (Ollama)</h2>
+      <button id="btnCloseSettings" class="icon-btn">✕</button>
+    </div>
+    <div class="cfg-tabs">
+      <button class="cfg-tab active" data-tab="conn">🔌 连接 & 模型</button>
+      <button class="cfg-tab" data-tab="ai">🎚️ AI 参数</button>
+      <button class="cfg-tab" data-tab="external">🔗 外部API</button>
+      <button class="cfg-tab" data-tab="prompts">📚 Prompt 仓库</button>
+    </div>
+    <div class="modal-body">
+      <!-- Tab 1: 连接与模型 -->
+      <div class="cfg-col cfg-tab-pane active" data-pane="conn">
+        <h3>🐳 Ollama 连接</h3>
+        <label class="inp">Base URL
+          <input id="cfgBaseUrl" type="text" placeholder="http://127.0.0.1:11434" />
+        </label>
+        <label class="inp">
+          选择本地模型（一键切换）
+          <div class="model-select-row">
+            <select id="cfgModel" class="cfg-model-select"></select>
+            <button id="btnRefreshModels" class="btn btn-xs btn-default" title="刷新模型列表">🔄</button>
+          </div>
+        </label>
+        <label class="inp">
+          或手动输入模型名（如列表未出现时使用）
+          <input id="cfgModelManual" type="text" placeholder="deepseek / qwen2.5:7b 等" />
+        </label>
+        <div class="two-col">
+          <label class="inp">超时（秒）<input id="cfgTimeout" type="number" min="10" /></label>
+          <label class="inp">默认温度<input id="cfgTemp" type="number" step="0.1" min="0" max="2" /></label>
+        </div>
+        <div class="test-row">
+          <button id="btnTestConn" class="btn btn-default">🔌 连通测试</button>
+          <button id="btnTestGpu" class="btn btn-warn">⚡ GPU 心跳（真跑一次）</button>
+        </div>
+        <div class="gpu-health-box">
+          <div class="ghb-row">
+            <span class="gpu-led" id="gpuLed"></span>
+            <span id="gpuStatus" class="ghb-text">未检测</span>
+          </div>
+          <div class="ghb-detail" id="gpuDetail"></div>
+        </div>
+        <div class="test-status-row">
+          <span id="connStatus" class="conn-st">点击上方按钮开始检测</span>
+        </div>
+        <h3 style="margin-top:14px">📦 本地已下载模型</h3>
+        <div class="model-list" id="modelList">
+          <div class="ml-empty">尚未查询。点击「🔄」或「🔌 连通测试」可刷新列表。</div>
+        </div>
+      </div>
+      <!-- Tab 2: AI 参数 -->
+      <div class="cfg-col cfg-tab-pane" data-pane="ai">
+        <h3>🎚️ 三模态温度</h3>
+        <div class="two-col">
+          <label class="inp">Writer 作家<input id="cfgW" type="number" step="0.1" min="0" max="2"/></label>
+          <label class="inp">Reviewer 总监<input id="cfgR" type="number" step="0.1" min="0" max="2"/></label>
+        </div>
+        <div class="two-col">
+          <label class="inp">Chat 助手<input id="cfgC" type="number" step="0.1" min="0" max="2"/></label>
+          <label class="inp">检索 Top-K<input id="cfgK" type="number" min="1" max="30"/></label>
+        </div>
+        <h3 style="margin-top:18px">✏️ 章节名称</h3>
+        <label class="inp">
+          允许 AI 修改章节名称
+          <div style="margin-top:6px">
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="checkbox" id="cfgAllowRename" /> 允许 AI 在修改内容时自动提出并修改章节名（单章与批量修改均生效）
+            </label>
+          </div>
+        </label>
+        <h3 style="margin-top:18px">🧩 Embedding 分块</h3>
+        <label class="inp">SentenceTransformer 模型
+          <input id="cfgEmb" type="text" placeholder="all-MiniLM-L6-v2" />
+        </label>
+        <div class="two-col">
+          <label class="inp">分块大小<input id="cfgChunk" type="number" min="100" max="4000"/></label>
+          <label class="inp">重叠长度<input id="cfgOverlap" type="number" min="0" max="500"/></label>
+        </div>
+      </div>
+      <!-- Tab 3: 外部API -->
+      <div class="cfg-col cfg-tab-pane" data-pane="external">
+        <h3>🌐 外部 API (OpenAI 兼容)</h3>
+        <label class="inp">
+          启用外部API
+          <div style="margin-top:6px">
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+              <input type="checkbox" id="cfgExtEnabled" /> 启用（关闭时使用本地Ollama）
+            </label>
+          </div>
+        </label>
+        <div class="ext-slot-bar">
+          <label class="inp" style="flex:1;min-width:0">配置槽位（多套 API 互不覆盖）
+            <select id="cfgExtSlot"></select>
+          </label>
+          <div style="display:flex;gap:6px;align-items:flex-end;padding-bottom:4px">
+            <button id="btnAddExtSlot" class="btn btn-xs btn-default">➕ 新建</button>
+            <button id="btnDelExtSlot" class="btn btn-xs btn-default">🗑 删除</button>
+          </div>
+        </div>
+        <label class="inp">API Base URL
+          <input id="cfgExtBaseUrl" type="text" placeholder="https://api.openai.com/v1" />
+        </label>
+        <label class="inp">API Key
+          <input id="cfgExtApiKey" type="password" placeholder="sk-..." autocomplete="off" />
+        </label>
+        <label class="inp">模型名
+          <input id="cfgExtModel" type="text" placeholder="gpt-4o-mini / claude-3-opus 等" />
+        </label>
+        <div class="two-col">
+          <label class="inp">超时（秒）<input id="cfgExtTimeout" type="number" min="10" max="600" /></label>
+          <label class="inp">温度<input id="cfgExtTemp" type="number" step="0.1" min="0" max="2" /></label>
+        </div>
+        <div class="test-row">
+          <button id="btnTestExtConn" class="btn btn-default">🔌 测试连接</button>
+          <button id="btnListExtModels" class="btn btn-default">📋 列出模型</button>
+        </div>
+        <div class="test-status-row">
+          <span id="extConnStatus" class="conn-st">点击测试连接验证外部API可用性</span>
+        </div>
+        <div class="model-list" id="extModelList">
+          <div class="ml-empty">尚未查询外部API可用模型列表。</div>
+        </div>
+      </div>
+      <!-- Tab 4: Prompt 仓库管理 -->
+      <div class="cfg-col cfg-tab-pane" data-pane="prompts">
+        <div class="prompts-top-bar">
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="cfg-tab-prompt-btn active" data-cat="all">全部</button>
+            <button class="cfg-tab-prompt-btn" data-cat="instruction">修改要求</button>
+            <button class="cfg-tab-prompt-btn" data-cat="global">全局指令</button>
+            <button class="cfg-tab-prompt-btn" data-cat="agent">Agent设定</button>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <input id="promptsSearch" class="prompts-search" placeholder="🔍 搜索..." />
+            <button id="btnNewPrompt" class="btn btn-xs btn-primary">➕ 新建</button>
+          </div>
+        </div>
+        <div id="promptsList" class="prompts-list" style="flex:1;overflow-y:auto"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button id="btnResetCfg" class="btn btn-default">恢复默认</button>
+      <button id="btnSaveCfg" class="btn btn-primary">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<!-- Prompt 编辑弹窗（新建/编辑） -->
+<div id="promptEditModal" class="modal" style="display:none;z-index:140">
+  <div class="modal-wrap" style="max-width:580px;width:90vw">
+    <div class="modal-head">
+      <h2 id="pemTitle">📝 新建 Prompt</h2>
+      <button id="btnClosePem" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body" style="flex-direction:column;gap:12px">
+      <input type="hidden" id="pemId" />
+      <label class="inp">标题
+        <input id="pemTitleInput" type="text" placeholder="给模板起个易记的名字" />
+      </label>
+      <div class="two-col">
+        <label class="inp">分类
+          <select id="pemCategory">
+            <option value="instruction">📝 修改要求</option>
+            <option value="global">🌐 全局修改指令</option>
+            <option value="agent">🎭 Writer Agent 设定</option>
+          </select>
+        </label>
+        <label class="inp">标签（逗号分隔）
+          <input id="pemTags" type="text" placeholder="古风,润色,权谋" />
+        </label>
+      </div>
+      <label class="inp">备注
+        <input id="pemNote" type="text" placeholder="适用场景、注意事项..." />
+      </label>
+      <label class="inp">Prompt 内容
+        <textarea id="pemContent" rows="7" placeholder="输入实际的 Prompt 文本"></textarea>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button id="btnDeletePem" class="btn btn-warn" style="display:none;margin-right:auto">🗑️ 删除</button>
+      <button id="btnCancelPem" class="btn btn-default">取消</button>
+      <button id="btnSavePem" class="btn btn-primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<script src="/js/app.js"></script>
+</body>
+</html>
