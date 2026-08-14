@@ -627,6 +627,8 @@ def api_study_start(novel_id):
     """启动读书模式：AI 逐章阅读并自动提取设定"""
     data = request.json or {}
     chapter_indices = data.get("chapters")  # None=全部, [1,2,3]=指定章节
+    template = data.get("template") or "detailed"  # 世界书总结风格模板
+    categories = data.get("categories")  # 要提取的分类名列表；None/空 = 全部启用分类
 
     # 检查是否已在运行
     if novel_id in _study_threads:
@@ -688,11 +690,13 @@ def api_study_start(novel_id):
             except Exception:
                 pass
 
-            # AI 提取设定
+            # AI 提取设定（小说转世界书：按启用分类提取）
             res = ai.reviewer_summarize_chapter(
                 chapter_idx=ch["index"],
                 chapter_title=title,
-                chapter_content=content
+                chapter_content=content,
+                template=template,
+                categories=categories
             )
             progress["results"].append(res)
             progress["done"] = i + 1
@@ -863,16 +867,53 @@ def api_worldbook_extract(novel_id):
     idx = data.get("chapter_idx")
     if idx is None:
         return _json_error("请指定章节号")
+    template = data.get("template") or "detailed"
     try:
         ch = novel_svc.get_chapter(novel_id, int(idx))
         if not ch:
             return _json_error("章节不存在")
         ai = TriModelAI(novel_id)
         res = ai.reviewer_summarize_chapter(int(idx), ch.get("title", ""),
-                                            ch.get("content", ""))
+                                            ch.get("content", ""), template=template)
         return jsonify({"ok": True, "result": res})
     except Exception as e:
         return _json_error(f"提取设定失败: {e}")
+
+
+@app.route("/api/novels/<novel_id>/worldbook/summarize_keyword", methods=["POST"])
+def api_worldbook_summarize_keyword(novel_id):
+    """关键词定向总结（世界书模式二）：全文检索含关键词的章节片段，AI 通读后总结该实体设定并写入世界书。"""
+    data = request.json or {}
+    keyword = (data.get("keyword") or "").strip()
+    if not keyword:
+        return _json_error("请输入关键词/实体名")
+    template = data.get("template") or "detailed"
+    try:
+        # 全文检索：找到含关键词的章节与上下文片段
+        results = novel_svc.search_text(novel_id, keyword)
+        chunks = []
+        for res in results[:12]:
+            for m in (res.get("matches") or [])[:2]:
+                ctx = m.get("context") or ""
+                if m.get("in_title"):
+                    ctx = res.get("title", "")
+                chunks.append(f"[第{res['index']}章《{res.get('title', '')}》] {ctx}")
+        if not chunks:
+            ai = TriModelAI(novel_id)
+            return jsonify({"ok": True, "message": f"未检索到「{keyword}」相关内容，无法总结", "book": ai.load_worldbook()})
+        context_text = "\n\n".join(chunks)[:9000]
+        ai = TriModelAI(novel_id)
+        res = ai.summarize_worldbook_keyword(keyword, context_text, template)
+        if isinstance(res, dict) and res.get("error"):
+            return _json_error(res["error"])
+        entries = res.get("entries") or []
+        book = ai.load_worldbook()
+        added = ai._merge_worldbook_entries(book, entries, 0)
+        ai.save_worldbook(book)
+        return jsonify({"ok": True, "added": added, "entries_count": len(entries),
+                        "entries": entries, "book": book})
+    except Exception as e:
+        return _json_error(f"关键词总结失败: {e}")
 
 
 # ========== 外部 API 管理 ==========
@@ -1095,6 +1136,11 @@ def api_bulk_start(novel_id):
     keywords = [k.strip() for k in (data.get("keywords") or []) if k and k.strip()]
     instruction = (data.get("instruction") or "").strip()
     chapter_range = data.get("chapter_range") or {}
+    wb_template = data.get("template") or "detailed"  # 批量中同步提取设定的世界书总结模板
+    # 是否在批量修改时同步提取设定到世界书（默认关闭：省 token，世界书可在读书模式单独更新）
+    sync_worldbook = bool(data.get("sync_worldbook", False))
+    # 是否同步更新向量记忆（纯代码索引、不消耗 AI token，默认开启）
+    sync_memory = bool(data.get("sync_memory", True))
 
     if mode == "all":
         # 全章节模式：不依赖关键词，AI 逐章阅读后自行判断是否需要修改
@@ -1137,6 +1183,7 @@ def api_bulk_start(novel_id):
         "searched": 0, "hit": [], "modified": [], "skipped": [], "errors": [],
         "current_keyword": "", "last_chapter": 0, "last_title": "",
         "instruction": instruction, "keywords": keywords, "mode": mode,
+        "sync_worldbook": sync_worldbook,
         "chapter_range": (chapter_range if not isinstance(chapter_range, list)
                           else {"list": [int(x) for x in chapter_range]})
     }
@@ -1188,6 +1235,7 @@ def api_bulk_start(novel_id):
             full_ch = novel_svc.get_chapter(novel_id, idx)
             content = full_ch.get("content", "") if full_ch else ""
             if not content:
+                progress["phase"] = f"skipped:{idx}"
                 progress["done"] = i + 1
                 continue
 
@@ -1202,31 +1250,49 @@ def api_bulk_start(novel_id):
                 found = [kw for kw in keywords if kw.lower() in lower]
                 progress["searched"] += 1
                 if not found:
+                    progress["phase"] = f"skipped:{idx}"
                     progress["done"] = i + 1
                     continue
                 progress["hit"].append(idx)
             progress["current_keyword"] = ", ".join(found) if found else "（AI 自行判断）"
             title = ch.get("title", "")
 
-            # 阶段1：提取设定（保证设定正确性；连接类错误自动重试一次）
-            progress["phase"] = f"reading:{idx}"
-            _ai_call("reviewer_summarize_chapter", idx, title, content, max_attempts=2)
+            # 构建前后章节上下文（规划与修改阶段共用）：前一章结尾 + 后一章开头
+            neighbor_ctx = ""
+            prev_ch = novel_svc.get_chapter(novel_id, idx - 1)
+            if prev_ch:
+                pc = prev_ch.get("modified_content") or prev_ch.get("content") or ""
+                if pc:
+                    neighbor_ctx += (f"[前一章 第{idx-1}章《{prev_ch.get('title', '')}》结尾]\n{pc[-800:]}")
+            next_ch = novel_svc.get_chapter(novel_id, idx + 1)
+            if next_ch:
+                nc = next_ch.get("modified_content") or next_ch.get("content") or ""
+                if nc:
+                    neighbor_ctx += (f"\n\n[后一章 第{idx+1}章《{next_ch.get('title', '')}》开头]\n{nc[:800]}")
 
-            # 阶段2：预思考本章修改方案（连接类错误自动退避重试）
+            # 阶段2：预思考本章修改方案（阅读本章+前后章节上下文+世界书设定，连接类错误自动退避重试）
             progress["phase"] = f"planning:{idx}"
             plan = _ai_call("plan_chapter_modification",
                             chapter_idx=idx, chapter_title=title,
                             chapter_content=content, keywords=found,
                             instruction=instruction,
-                            global_prompt=g_prompt, custom_instruction=c_instruction)
+                            global_prompt=g_prompt, custom_instruction=c_instruction,
+                            neighbor_context=neighbor_ctx)
             progress.setdefault("plans", {})[idx] = plan
 
             # AI 判断本章无需修改则跳过（不进入修改阶段），省时省 token
-            if isinstance(plan, dict) and not plan.get("error"):
+            if isinstance(plan, dict) and plan.get("error"):
+                # 规划失败：不进入修改阶段（避免白耗一次全文修改调用），记录错误后继续
+                progress["errors"].append({"chapter": idx, "error": plan["error"]})
+                progress["phase"] = f"skipped:{idx}"
+                progress["done"] = i + 1
+                continue
+            if isinstance(plan, dict):
                 need = plan.get("need_modify", True)
                 plan_items = plan.get("plan") or []
                 if not need or not plan_items:
                     progress["skipped"].append(idx)
+                    progress["phase"] = f"skipped:{idx}"
                     progress["done"] = i + 1
                     continue
 
@@ -1257,7 +1323,7 @@ def api_bulk_start(novel_id):
                     )
                 already_ctx = "\n\n".join(lines)
 
-            # 阶段3：基于方案执行修改（连接类错误自动退避重试）
+            # 阶段3：基于方案执行修改（阅读前后章节上下文+世界书设定+已修改回顾，连接类错误自动退避重试）
             progress["phase"] = f"modifying:{idx}"
             res = _ai_call("bulk_modify_chapter",
                            chapter_idx=idx, chapter_title=title,
@@ -1265,6 +1331,7 @@ def api_bulk_start(novel_id):
                            keywords=found, instruction=instruction,
                            global_prompt=g_prompt, custom_instruction=c_instruction,
                            already_modified_context=already_ctx,
+                           neighbor_context=neighbor_ctx,
                            modification_plan=plan)
             if isinstance(res, dict) and res.get("error"):
                 progress["errors"].append({"chapter": idx, "error": res["error"]})
@@ -1287,11 +1354,16 @@ def api_bulk_start(novel_id):
                     "new_title": new_title,
                     "keywords": found
                 }
-                # 每修改一章立即更新向量记忆，使后续章节检索到已修改内容
-                try:
-                    ai.memory.index_chapter(idx, title, modified)
-                except Exception:
-                    pass
+                # 每修改一章立即更新向量记忆，使后续章节检索到已修改内容（纯代码索引，不耗AI token）
+                if sync_memory:
+                    try:
+                        ai.memory.index_chapter(idx, title, modified)
+                    except Exception:
+                        pass
+                # 可选：仅对实际修改的章节同步提取设定到世界书（默认关闭省 token）
+                if sync_worldbook:
+                    progress["phase"] = f"reading:{idx}"
+                    _ai_call("reviewer_summarize_chapter", idx, title, modified, wb_template, max_attempts=2)
                 modified_records.append({
                     "chapter": idx, "title": title, "keywords": found,
                     "snippet": modified[:150]
@@ -1391,16 +1463,19 @@ def api_bulk_confirm(novel_id):
             a = TriModelAI(novel_id)
         except Exception:
             return
+        pg = (_bulk_threads.get(novel_id, {}).get("progress") or {})
+        do_sync_wb = bool(pg.get("sync_worldbook", False))  # 仅在勾选"同步世界书"时才提取设定
         for idx, e in pairs:
             title = e.get("new_title") or e.get("title", "")
             try:
                 a.memory.index_chapter(idx, title, e["modified"])
             except Exception:
                 pass
-            try:
-                a.reviewer_summarize_chapter(idx, title, e["modified"])
-            except Exception:
-                pass
+            if do_sync_wb:
+                try:
+                    a.reviewer_summarize_chapter(idx, title, e["modified"])
+                except Exception:
+                    pass
     if confirmed_pairs:
         threading.Thread(target=_async_update_memory, args=(confirmed_pairs,), daemon=True).start()
 

@@ -39,6 +39,8 @@ const state = {
     selectedChapters: null, // null=全部, [] = 手动选择的章节索引列表
     showChSel: false
   },
+  // 世界书总结模板（详细/简洁/剧情）
+  wbTemplate: "detailed",
   // 总体设定修改状态
   bulk: {
     running: false,
@@ -383,6 +385,19 @@ function bindEvents() {
   document.getElementById("btnCloseWb").onclick = closeWorldbookModal;
   document.getElementById("btnCancelWb").onclick = closeWorldbookModal;
   document.getElementById("btnSaveWb").onclick = saveWorldbookEntry;
+  // 世界书总结模板切换
+  const wbTplSel = document.getElementById("wbTemplateSel");
+  if (wbTplSel) wbTplSel.onchange = () => {
+    state.wbTemplate = wbTplSel.value;
+    toast(`世界书总结模板已切换：${wbTplSel.options[wbTplSel.selectedIndex].text}`, "success");
+  };
+  // 世界书关键词定向总结
+  const btnWbKw = document.getElementById("btnWbKw");
+  if (btnWbKw) {
+    btnWbKw.onclick = summarizeWorldbookKeyword;
+    const wbKwIn = document.getElementById("wbKwInput");
+    if (wbKwIn) wbKwIn.onkeydown = e => { if (e.key === "Enter") summarizeWorldbookKeyword(); };
+  }
 
   // ============== 新增：AI 供应商切换 ==============
   document.getElementById("btnProviderLocal").onclick = () => switchAIProvider("local");
@@ -2084,7 +2099,8 @@ async function startStudy() {
   if (state.study.running) return toast("读书已在运行中", "warn");
 
   try {
-    const payload = { chapters: state.study.selectedChapters };
+    const cats = Array.from(document.querySelectorAll(".study-cat:checked")).map(c => c.value);
+    const payload = { chapters: state.study.selectedChapters, template: state.wbTemplate, categories: cats };
     const r = await api(`/api/novels/${state.novelId}/study/start`, { method: "POST", body: payload });
     if (!r.ok) {
       if (r.message) { toast(r.message, "warn"); return; }
@@ -2095,7 +2111,7 @@ async function startStudy() {
     document.getElementById("btnStudyStop").disabled = false;
     document.getElementById("studyProgress").style.display = "block";
     document.getElementById("studyInfo").textContent = "启动中...";
-    toast("读书模式已启动！AI 将逐章阅读并提取设定", "success");
+    toast(`小说转世界书已启动：AI 将逐章阅读并按所选分类提取设定（${cats.length} 类）`, "success");
     // 开始轮询进度
     pollStudyStatus();
   } catch (e) { toast("启动读书失败：" + e.message, "error"); }
@@ -2127,7 +2143,7 @@ function pollStudyStatus() {
         if (p && p.status === "done") {
           updateStudyProgress(p);
           document.getElementById("studyInfo").textContent = `完成！已阅读 ${p.total} 章`;
-          toast("读书完成！设定摘要已更新", "success");
+          toast("小说转世界书完成！世界书设定已生成/更新", "success");
           // 自动加载设定摘要
           loadSettingsSummary();
         } else if (p && p.status === "stopped") {
@@ -2176,6 +2192,30 @@ async function loadSettingsSummary() {
   } catch (e) {
     document.getElementById("settingsSummaryBox").innerHTML = `
       <div class="ss-empty" style="color:var(--danger)">加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// ====== 世界书关键词定向总结（模式二）：全文检索相关片段 → AI 总结该实体设定写入世界书 ======
+async function summarizeWorldbookKeyword() {
+  if (!state.novelId) return toast("请先选择一本小说", "warn");
+  const kw = (document.getElementById("wbKwInput").value || "").trim();
+  if (!kw) return toast("请输入要总结的实体名/关键词", "warn");
+  const btn = document.getElementById("btnWbKw");
+  btn.disabled = true;
+  btn.textContent = "⏳ 检索并总结中...";
+  try {
+    const r = await api(`/api/novels/${state.novelId}/worldbook/summarize_keyword`, {
+      method: "POST", body: { keyword: kw, template: state.wbTemplate }
+    });
+    if (!r.ok) { toast(r.error || "总结失败", "error"); return; }
+    if (r.added) toast(`✅ 已总结「${kw}」相关设定 ${r.added} 条并写入世界书`, "success");
+    else toast(r.message || `「${kw}」未产生新条目（可能已存在或未检索到）`, "warn");
+    loadSettingsSummary();
+  } catch (e) {
+    toast("总结失败：" + e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🧠 总结该设定";
   }
 }
 
@@ -2709,6 +2749,9 @@ async function startBulkModify() {
       method: "POST",
       body: {
         keywords, instruction, chapter_range: range, mode,
+        template: state.wbTemplate,
+        sync_worldbook: document.getElementById("bulkWbSync").checked,
+        sync_memory: document.getElementById("bulkMemSync").checked,
         global_prompt: document.getElementById("globalPrompt").value.trim(),
         custom_instruction: document.getElementById("customAgent").value.trim()
       }
@@ -2769,7 +2812,7 @@ function updateBulkProgress(p) {
   document.getElementById("bulkBar").style.width = pct + "%";
   document.getElementById("bulkBarText").textContent = pct + "%";
   let info = `进度 ${done}/${total} 章 · ${p.mode === "all" ? "处理" : "命中"} ${p.hit.length} · 已修改 ${p.modified.length}${(p.skipped || []).length ? ` · 跳过 ${p.skipped.length}` : ""}`;
-  const phaseMap = { "reading": "📖 整理设定", "planning": "🧠 预思考方案", "modifying": "✍️ 修改中" };
+  const phaseMap = { "reading": "📖 整理设定", "planning": "🧠 预思考方案", "modifying": "✍️ 修改中", "skipped": "⏭️ 已跳过" };
   if (p.phase && p.phase !== "done") {
     const [ph, ci] = String(p.phase).split(":");
     if (phaseMap[ph]) info += ` | ${phaseMap[ph]}（第${ci}章）`;

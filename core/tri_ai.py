@@ -42,40 +42,102 @@ REVIEWER_SYSTEM = """你是一位严格的文学审校总监（Reviewer AI），
 - 禁止输出JSON以外的内容。
 """
 
-SUMMARIZER_SYSTEM = """你是一位小说设定分析师（Worldbook 世界书编辑），负责从小说章节中提取设定并整理为「世界书条目」。
+# ========== 世界书总结 Prompt 模板（小说转世界书，参考 Nika-Character-Studio 分类模板系统） ==========
+# 每个模板都强制：content 使用总分结构（# 标题 + 1.2.3. 列举 + 先概括再 - 细分），严禁 **粗体字**。
+SUMMARIZER_TEMPLATES = {
+    "detailed": "📖 详细梳理版（推荐）：所有设定尽量完整详细，分条列举",
+    "concise": "📌 简洁版：只保留核心设定与关键信息，每条精简",
+    "storyline": "🎬 剧情推进版：侧重剧情事件、人物关系与时间线发展",
+}
+
+# 分类模板：每个分类给出 content 应包含的字段（输出时用 # 标题 + 1.2.3 列举）
+WORLDBOOK_CATEGORY_TEMPLATES = {
+    "角色": ["名称", "称号与相关别称", "性别", "MBTI", "年龄", "身份",
+             "外貌（存在不同时期变化或变体时，按时期分别叙述）",
+             "背景经历（按时间线分条，如 - 第X章：…）",
+             "性格", "技能", "重要事件", "弱点", "话语示例"],
+    "地点": ["名称", "别称", "位置", "特征", "重要事件"],
+    "组织": ["名称", "性质", "成员", "目标", "重要事件"],
+    "物品": ["名称", "类型", "功能", "来源", "持有者"],
+    "种族": ["名称", "特征", "能力", "栖息地", "与人类关系"],
+    "世界观": ["世界规则", "力量体系", "历史背景", "地理", "重要设定"],
+    "剧情": ["主线剧情", "支线剧情", "关键转折点", "伏笔与暗线"],
+    "关系": ["双方", "关系性质", "发展过程"],
+    "知识书": ["条目定义/说明", "相关细节", "影响与用途"],
+}
+
+_ALL_CATEGORIES = list(WORLDBOOK_CATEGORY_TEMPLATES.keys())
+
+
+def _build_summarizer_system(template: str, categories=None) -> str:
+    """生成世界书总结 system prompt（小说转世界书）。
+    template：风格模板（detailed/concise/storyline）。
+    categories：本次要提取的分类名列表；None 表示全部启用分类。
+    """
+    cats = categories or _ALL_CATEGORIES
+    cats = [c for c in cats if c in WORLDBOOK_CATEGORY_TEMPLATES] or _ALL_CATEGORIES
+    cat_lines = []
+    for c in cats:
+        fields = "、".join(f"{i+1}. {f}" for i, f in enumerate(WORLDBOOK_CATEGORY_TEMPLATES[c]))
+        cat_lines.append(f"- {c}：{fields}")
+    cat_block = "\n".join(cat_lines)
+    plot_note = ""
+    if "剧情" in cats:
+        plot_note = """
+【剧情条目特别说明】
+- 除本章具体事件外，若本章对主线/支线有明显推进或埋下伏笔，可提取为「剧情」类条目（name 可用「主线剧情」「支线剧情」「关键转折点」「伏笔与暗线」），content 概括该线索在本章的发展与当前状态。
+"""
+    extra = {
+        "detailed": "",
+        "concise": "\n【简洁要求】content 每条尽量精简（3-6 行内），只保留最具区分度的设定信息，省略冗余修饰，但仍须满足分类字段与总分结构要求。",
+        "storyline": "\n【剧情侧重】内容重点梳理剧情事件、人物关系变化与时间线推进；其他分类设定仍须满足字段要求，可适当从简。",
+    }.get(template, "")
+
+    return f"""你是一位小说设定分析师（Worldbook 世界书编辑），负责把整本小说逐步转化为可用的世界书（小说转世界书）：从章节中提取设定并整理为「世界书条目」。
 
 世界书条目 = 一段可独立读取的设定，配有关键词（触发词）。后续 AI 修改小说内容时，只要正文中出现某条目的触发词，就会读取该条目作为参考。
 
 任务：
 1. 仔细阅读给定的章节内容
-2. 提取所有关键设定，为每个设定生成一个条目
+2. 按启用的分类提取所有关键设定，为每个设定生成一个条目
 3. 输出结构化JSON
 
 输出格式（严格JSON）：
-{
+{{
   "entries": [
-    {
-      "category": "角色/种族/物品/世界观/剧情/关系",
+    {{
+      "category": "{'/'.join(cats)}",
       "name": "设定名称",
       "keys": ["触发词1", "触发词2"],
-      "content": "设定完整描述（可直接供AI参考的详细内容）",
+      "content": "设定完整描述（按对应分类字段模板 + 总分结构整理）",
       "first_appearance": "第X章"
-    }
+    }}
   ],
   "summary": "本章一句话摘要"
-}
+}}
 
 关键要求：
-- category 必须是：角色、种族、物品、世界观、剧情、关系 之一
-- 【合并规则】同一个角色/物品/种族无论出现多少章、有多少形态/身份/别名，始终只输出【一个条目】。严禁把同一实体的不同形态、身份、境界、能力、事件拆分成多个条目（例如"康桥"只能有一个条目，不能有"康桥（哥斯拉）""康桥（水蜥蜴形态）"等多个条目）
-- 【触发词规则】keys 只写该实体的真实名称、别名、称号、绰号（如 康桥、哥斯拉、卡美拉、龙裔）。严禁把形态描述（水蜥蜴、蜥蜴、四脚蛇）、能力名（岩浆浴）、状态名、事件名、日常行为词当作触发词
-- 形态、能力、经历、事件等细节一律写入该条目的 content 中，作为设定的组成部分
-- 角色/物品的 keys 必须包含所有名称与别名（例如古剑「霜月」→ keys:["古剑","霜月"]）
-- 种族要单独作为 category（如精灵族、兽人族）
-- content 尽量完整详细，说明该设定的来源、规则、属性，供后续修改时保持一致
-- 只提取本章新出现或被明确重申的设定，不要重复已确定的旧设定
+- category 必须是本次提取分类之一：{", ".join(cats)}
+- 【合并规则】同一个实体（角色/地点/组织/物品/种族等）无论出现多少章、有多少形态/身份/别名，始终只输出【一个条目】，内容发展式追加，严禁拆分成多个条目
+- 【触发词规则】keys 只写该实体的真实名称、别名、称号、绰号。严禁把形态描述、能力名、状态名、事件名、日常行为词当作触发词
+- 形态、能力、经历、事件等细节一律写入 content，作为设定的组成部分
+- keys 必须包含所有名称与别名
+- 只提取本章新出现或被明确重申的设定，不要重复已确定的旧条目
 - 如果本章没有某类设定，entries 可以为空数组
-"""
+
+【分类字段模板】（content 必须按对应分类的字段整理；未启用的分类不提取）：
+{cat_block}
+{plot_note}
+【content 排版硬性要求】（对所有条目的 content 生效）：
+- 必须严格按照"总分结构"分类分条列举设定、梳理各方面设定
+- 使用 # 标题格式 区分各部分设定
+- 用 1. 2. 3. 列举各部分设定
+- 严禁使用 **粗体字** 格式（不要出现 **xxx**）
+- 每部分必须先阐述概括性内容，再以"- 具体内容"的格式分条列举进一步细分的设定内容
+{extra}"""
+
+
+SUMMARIZER_SYSTEM = _build_summarizer_system("detailed")
 
 
 CHAT_SYSTEM = """你是一位小说内容助手（Chat AI），能够回答读者对小说内容的任何问题。
@@ -312,7 +374,7 @@ class TriModelAI:
         return added
 
     @staticmethod
-    def _match_worldbook(entries: list, text: str, limit: int = 15) -> list:
+    def _match_worldbook(entries: list, text: str, limit: int = 8) -> list:
         """关键词触发：返回内容中出现触发词的条目（最多 limit 条）。无触发词的条目不自动触发。"""
         if not entries or not text:
             return []
@@ -347,10 +409,10 @@ class TriModelAI:
                     "notes": e.get("notes", ""),
                     "first_appearance": e.get("first_appearance", "")
                 })
-            elif cat in ("世界观", "种族"):
+            elif cat in ("世界观", "种族", "地点", "组织", "知识书"):
                 world.append({
                     "name": e.get("name", ""),
-                    "category": "种族" if cat == "种族" else "世界观",
+                    "category": "种族" if cat == "种族" else ("地点" if cat == "地点" else ("组织" if cat == "组织" else "世界观")),
                     "description": e.get("content", ""),
                     "first_mentioned": e.get("first_appearance", ""),
                     "notes": e.get("notes", "")
@@ -373,28 +435,31 @@ class TriModelAI:
                 "last_chapter": book.get("last_chapter", 0)}
 
     def reviewer_summarize_chapter(self, chapter_idx: int, chapter_title: str,
-                                    chapter_content: str) -> dict:
+                                    chapter_content: str, template: str = "detailed",
+                                    categories=None) -> dict:
         """
         审校 Agent 自动阅读章节，提取角色/种族/物品等设定为世界书条目（带触发词）。
         自动去重合并到 worldbook.json。
+        template：世界书总结风格模板（detailed/concise/storyline）。
+        categories：本次要提取的分类名列表（None=全部），见 WORLDBOOK_CATEGORY_TEMPLATES。
         """
         client = self._get_ai_client()
 
         book = self.load_worldbook()
         existing = [f"[{e.get('category', '')}] {e.get('name', '')}" for e in book.get("entries", [])]
-        existing_block = "\n".join(existing) or "（暂无）"
+        existing_block = "\n".join(existing[:200]) or "（暂无）"
 
         prompt = f"""当前章节：第{chapter_idx}章《{chapter_title}》
 
-【已记录的世界书条目（避免重复提取）】
+【已记录的世界书条目（避免重复提取，仅列前200条）】
 {existing_block}
 
 【章节内容】
-{chapter_content[:12000]}
+{chapter_content[:5000]}
 
 请严格按JSON格式输出本章新出现或被重申的新设定条目。只提取新的，不重复已有条目。"""
 
-        res = client.generate(prompt=prompt, system=SUMMARIZER_SYSTEM,
+        res = client.generate(prompt=prompt, system=_build_summarizer_system(template, categories),
                               temperature=0.3, stream=False)
         content = (res or {}).get("content", "")
         if res and res.get("error"):
@@ -417,16 +482,56 @@ class TriModelAI:
 
         return {"error": "未找到有效JSON", "chapter": chapter_idx, "raw": content[:200]}
 
+    def summarize_worldbook_keyword(self, keyword: str, context_text: str,
+                                    template: str = "detailed") -> dict:
+        """
+        针对特定关键词/实体的定向设定总结：
+        AI 通读与该关键词相关的章节片段，总结该实体的设定并输出世界书条目（1-2 条）。
+        返回 {"entries": [...]}；失败返回 {"error": ...}
+        """
+        client = self._get_ai_client()
+        prompt = f"""【目标实体 / 关键词】{keyword}
+
+【检索到的相关章节片段（按章节顺序）】
+{context_text}
+
+请基于以上内容，总结「{keyword}」这一实体的完整设定，输出 1 个（最多 2 个）世界书条目。
+要求：
+- 若内容涉及多个不同实体，只输出与「{keyword}」直接相关的条目
+- category 自动判断：角色/种族/物品/世界观/剧情/关系
+- keys 必须包含该实体的所有名称、别名、称号
+- content 严格按角色结构与总分结构要求整理
+- 只输出JSON，禁止其他内容"""
+
+        res = client.generate(prompt=prompt, system=_build_summarizer_system(template),
+                              temperature=0.3, stream=False)
+        content = (res or {}).get("content", "")
+        if res and res.get("error"):
+            return {"error": res["error"]}
+        try:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                data = json.loads(content[start:end])
+                entries = data.get("entries", [])
+                return {"entries": entries, "raw_len": len(content)}
+        except (json.JSONDecodeError, KeyError) as e:
+            return {"error": f"JSON解析失败: {e}", "raw": content[:200]}
+        return {"error": "未找到有效JSON", "raw": content[:200]}
+
     # ========== 统一上下文构建 ==========
 
     def _build_full_context(self, current_text: str, instruction: str,
                             chapter_idx: Optional[int] = None,
                             chapter_title: str = "",
                             global_prompt: str = "",
-                            custom_instruction: str = "") -> str:
+                            custom_instruction: str = "",
+                            match_text: str = "") -> str:
         """
         构建完整上下文Prompt块，供Writer/Reviewer使用。
         包含：当前章节信息 + 世界书触发设定 + 向量记忆 + 全局要求 + 自定义Agent
+        match_text：用于关键词触发世界书的完整章节文本（默认回退到 current_text）。
+                   避免关键词只出现在章节中后段时漏读相关世界书设定。
         """
         parts = []
 
@@ -440,13 +545,13 @@ class TriModelAI:
         # 1. 世界书：关键词触发读取（正文中出现触发词才注入对应设定）
         book = self.load_worldbook()
         matched = self._match_worldbook(book.get("entries", []),
-                                        (current_text or "") + " " + (instruction or ""))
+                                        (match_text or current_text or "") + " " + (instruction or ""))
         if matched:
             lines = ["📖 【世界书设定·已命中】"]
             for e in matched:
                 keys = "、".join(e.get("keys", []) or [])
                 lines.append(f"▸ [{e.get('category', '其他')}] {e.get('name', '')}（触发词：{keys}）")
-                lines.append(f"   {e.get('content', '')[:300]}")
+                lines.append(f"   {e.get('content', '')[:180]}")
             parts.append("\n".join(lines))
 
         # 2. 向量记忆
@@ -461,7 +566,7 @@ class TriModelAI:
                     meta = r.get("meta", {})
                     mem_lines.append(
                         f"[第{meta.get('chapter_idx','?')}章《{meta.get('chapter_title','')}》|"
-                        f"相关度{r.get('score','?')}]\n{r.get('content','')[:300]}"
+                        f"相关度{r.get('score','?')}]\n{r.get('content','')[:180]}"
                     )
                 parts.append("\n\n".join(mem_lines))
 
@@ -592,8 +697,10 @@ class TriModelAI:
     def plan_chapter_modification(self, chapter_idx: int, chapter_title: str,
                                   chapter_content: str, keywords: Optional[list] = None,
                                   instruction: str = "", global_prompt: str = "",
-                                  custom_instruction: str = "") -> dict:
-        """批量修改前的预思考：审校 Agent 先阅读本章与命中的世界书设定，输出本章应修改哪些内容、如何修改。
+                                  custom_instruction: str = "",
+                                  neighbor_context: str = "") -> dict:
+        """批量修改前的预思考：审校 Agent 先阅读本章、前后章节上下文与命中的世界书设定，
+        输出本章应修改哪些内容、如何修改。
         返回 {"plan": [...], "focus": "..."}；失败返回 {"error": ...}"""
         # 附上按关键词命中的世界书设定，确保规划基于正确设定
         book = self.load_worldbook()
@@ -610,13 +717,17 @@ class TriModelAI:
             settings_block = "（无命中设定）"
         kw_list = "、".join(keywords or [])
 
+        neighbor_block = ""
+        if neighbor_context:
+            neighbor_block = f"【前后章节上下文（用于保证设定衔接一致，避免疏漏）】\n{neighbor_context}\n"
+
         prompt = f"""【当前章节】第{chapter_idx}章《{chapter_title}》
-【命中关键词】{kw_list or "（无，全章节模式由AI自行判断）"}
+{neighbor_block}【命中关键词】{kw_list or "（无，全章节模式由AI自行判断）"}
 【修改要求】{instruction}
 【已命中设定】
 {settings_block}
 【章节全文】
-{chapter_content[:8000]}
+{chapter_content[:6000]}
 
 请先通读本章与已整理设定，判断本章是否需要修改，并预思考需要修改哪些内容、如何修改，以保证修改后的内容符合全书设定。严格输出JSON：
 {{"need_modify": true, "plan":[{{"target":"要修改的对象或位置","change":"具体如何修改"}}],"focus":"本章修改重点（一句话）"}}
@@ -652,9 +763,11 @@ class TriModelAI:
                             keywords: Optional[list] = None, instruction: str = "",
                             global_prompt: str = "", custom_instruction: str = "",
                             already_modified_context: str = "",
+                            neighbor_context: str = "",
                             modification_plan: Optional[dict] = None) -> object:
         """总体设定修改：根据关键词命中的上下文，按修改要求修改整个章节。
         already_modified_context：前面已修改章节的回顾，用于保持跨章节一致、避免重复冗杂。
+        neighbor_context：前后章节上下文（用于保证相邻章节衔接自然）。
         modification_plan：预思考的修改方案（plan_chapter_modification 输出），用于保证设定正确性。
         返回修改后的完整章节文本(str)；失败返回 {"error": ...}"""
         full_context = self._build_full_context(
@@ -662,7 +775,8 @@ class TriModelAI:
             instruction=instruction,
             chapter_idx=chapter_idx,
             global_prompt=global_prompt,
-            custom_instruction=custom_instruction
+            custom_instruction=custom_instruction,
+            match_text=chapter_content  # 用整章内容匹配世界书触发词，避免中后段关键词漏读
         )
         kw_text = "\n".join(
             f"[命中关键词「{s.get('keyword', '')}」位置]\n{s.get('context', '')}"
@@ -678,6 +792,15 @@ class TriModelAI:
 {already_modified_context}
 
 注意：以上章节已按你的要求完成修改。请参考它们，保持设定、措辞、叙事风格完全一致，并避免与它们的修改重复冗杂（例如：不要重复交代同一设定、不要重复插入相同性质的描写）。"""
+
+        neighbor_block = ""
+        if neighbor_context:
+            neighbor_block = f"""
+
+【前后章节上下文（用于保证相邻章节衔接自然、不产生设定疏漏）】
+{neighbor_context}
+
+注意：修改本章时请确保与前一章结尾、后一章开头自然衔接，不重复、不冲突。"""
 
         plan_block = ""
         if modification_plan:
@@ -695,7 +818,7 @@ class TriModelAI:
 【本章预思考修改重点】
 {modification_plan.get('focus','')}"""
 
-        user_prompt = f"""{full_context}{already_block}{plan_block}
+        user_prompt = f"""{full_context}{already_block}{neighbor_block}{plan_block}
 
 【本次修改章节】第{chapter_idx}章《{chapter_title}》
 【检索关键词】{kw_list}
@@ -714,7 +837,8 @@ class TriModelAI:
 3. 直接输出修改后的完整章节全文，禁止JSON包裹、禁止添加任何解释文字
 4. 修改必须忠实于既有设定，避免OOC（角色崩坏）和设定冲突
 5. 若「已修改章节回顾」非空，必须与前面章节已修改的设定、措辞保持一致，不得重复冗杂
-6. 若提供了「预思考修改方案」，严格按方案执行修改点{self._rename_instruction()}"""
+6. 若提供了「前后章节上下文」，必须与前一章结尾、后一章开头自然衔接，不重复、不冲突
+7. 若提供了「预思考修改方案」，严格按方案执行修改点{self._rename_instruction()}"""
 
         client = self._get_ai_client()
         res = client.generate(prompt=user_prompt, system=WRITER_SYSTEM_FULL_CONTEXT,

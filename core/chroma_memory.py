@@ -154,29 +154,90 @@ class ChromaMemory:
         where = None
         if chapter_idx is not None and exclude_chapter:
             where = {"chapter_idx": {"$ne": int(chapter_idx)}}
+        # 结果合并：关键词精确命中优先，向量语义结果补充。
+        # 说明：默认内置 embedding（all-MiniLM-L6-v2）对中文几乎无区分度，
+        # 仅靠向量检索会"检索不到"，因此叠加关键词匹配保证中文可检索。
+        merged: Dict[str, dict] = {}
+        try:
+            kw_items = self._keyword_retrieve(query, k, chapter_idx, exclude_chapter)
+            for it in kw_items:
+                merged[it["id"]] = it
+        except Exception:
+            pass
         try:
             result = self.collection.query(
                 query_texts=[query],
                 n_results=max(1, min(k, max(1, self.collection.count()))),
                 where=where
             )
+            ids = result.get("ids", [[]])[0]
+            docs = result.get("documents", [[]])[0]
+            metas = result.get("metadatas", [[]])[0]
+            dists = result.get("distances", [[]])[0]
+            for i in range(len(ids)):
+                score = 1.0 - (dists[i] if dists[i] is not None else 1.0)
+                merged.setdefault(ids[i], {
+                    "id": ids[i],
+                    "content": docs[i],
+                    "meta": metas[i] or {},
+                    "score": round(float(score), 4)
+                })
+        except Exception:
+            pass
+        items = list(merged.values())
+        # 关键词命中( kw_hits )优先展示，其次按向量相关度
+        items.sort(key=lambda x: (x.get("kw_hits", 0), x.get("score", 0)), reverse=True)
+        return items[:k]
+
+    def _extract_keywords(self, query: str, max_words: int = 8) -> List[str]:
+        """从检索词中提取有区分度的关键词（长度≥2，跳过空白与常见虚词）。"""
+        q = (query or "").strip()
+        if not q:
+            return []
+        parts = re.split(r"[\s,，。、；;:：!！?？\"'“”‘’()（）《》<>·\-—\n]+", q)
+        kws = [p for p in parts if len(p) >= 2]
+        # 常见虚词/停用词，过滤掉以减少噪音
+        stop = {"什么", "怎么", "一个", "这个", "那个", "可以", "还有", "没有", "就是",
+                "我们", "你们", "他们", "已经", "时候", "因为", "所以", "但是", "不是",
+                "现在", "这样", "那样", "如果", "然后", "章节", "内容"}
+        kws = [w for w in kws if w not in stop]
+        if not kws:
+            kws = [q] if len(q) >= 2 else []
+        return kws[:max_words]
+
+    def _keyword_retrieve(self, query: str, k: int,
+                          chapter_idx: Optional[int] = None,
+                          exclude_chapter: bool = False) -> List[Dict]:
+        """基于关键词精确匹配的检索：遍历向量库全部块，统计命中词次数。"""
+        kws = self._extract_keywords(query)
+        if not kws:
+            return []
+        try:
+            all_data = self.collection.get(include=["documents", "metadatas"])
         except Exception:
             return []
-        items = []
-        ids = result.get("ids", [[]])[0]
-        docs = result.get("documents", [[]])[0]
-        metas = result.get("metadatas", [[]])[0]
-        dists = result.get("distances", [[]])[0]
-        for i in range(len(ids)):
-            score = 1.0 - (dists[i] if dists[i] is not None else 1.0)
-            items.append({
-                "id": ids[i],
-                "content": docs[i],
-                "meta": metas[i] or {},
-                "score": round(float(score), 4)
-            })
-        items.sort(key=lambda x: x["score"], reverse=True)
-        return items
+        ids = all_data.get("ids", [])
+        docs = all_data.get("documents", [])
+        metas = all_data.get("metadatas", [])
+        hits = []
+        for i, doc in enumerate(docs):
+            meta = metas[i] or {}
+            if chapter_idx is not None and exclude_chapter and meta.get("chapter_idx") == int(chapter_idx):
+                continue
+            text = doc or ""
+            cnt = 0
+            for kw in kws:
+                cnt += text.count(kw)
+            if cnt:
+                hits.append({
+                    "id": ids[i],
+                    "content": text,
+                    "meta": meta,
+                    "score": 1.0,
+                    "kw_hits": cnt
+                })
+        hits.sort(key=lambda x: x["kw_hits"], reverse=True)
+        return hits[:k]
 
     def retrieve_by_chapter(self, chapter_idx: int, limit: int = 50) -> List[Dict]:
         if not self._ensure_client():

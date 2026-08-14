@@ -792,6 +792,33 @@ code { font-family: var(--font-mono); font-size: 12px; background: var(--panel-3
   background: var(--bg); color: var(--text-1);
 }
 
+.wb-tpl-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; margin-bottom: 6px;
+  border: 1px dashed var(--border); border-radius: 8px;
+  background: var(--bg-2);
+}
+.wb-tpl-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.wb-tpl-bar select {
+  flex: 1; min-width: 0;
+  padding: 5px 6px; border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg); color: var(--text-1); font-size: 12px;
+}
+
+.wb-kw-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; margin-bottom: 6px;
+  border: 1px dashed var(--border); border-radius: 8px;
+  background: var(--bg-2);
+}
+.wb-kw-bar input {
+  flex: 1; min-width: 0;
+  padding: 5px 7px; border-radius: 6px; font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg); color: var(--text-1);
+}
+
 .test-row {
   display: flex; align-items: center; gap: 10px;
   margin: 8px 0 10px;
@@ -1261,6 +1288,24 @@ body.focused .pane.center { border-radius: 0; border: none; }
   display: flex; gap: 6px;
   margin-bottom: 6px;
 }
+.study-cats {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 6px 8px; margin-bottom: 6px;
+  border: 1px dashed var(--border); border-radius: 8px;
+  background: var(--bg-2);
+}
+.study-cats-label {
+  font-size: 11.5px; color: var(--muted);
+  white-space: nowrap; line-height: 20px;
+}
+.study-cats-list {
+  display: flex; flex-wrap: wrap; gap: 4px 10px;
+  font-size: 11.5px; color: var(--text-2);
+}
+.study-cats-list label {
+  display: inline-flex; align-items: center; gap: 3px; cursor: pointer;
+  white-space: nowrap;
+}
 .study-actions .btn { flex: 1; }
 .study-progress {
   margin-top: 6px;
@@ -1384,6 +1429,11 @@ body.focused .pane.center { border-radius: 0; border: none; }
   margin-bottom: 6px;
   font-size: 11.5px;
   color: var(--text-2);
+}
+.bulk-wb {
+  display: flex; align-items: center; gap: 6px;
+  margin: 4px 0 6px;
+  font-size: 11.5px; color: var(--muted); cursor: pointer;
 }
 .bulk-mode label {
   display: inline-flex; align-items: center; gap: 4px;

@@ -128,6 +128,12 @@
           <button id="btnBulkRangeAll" class="btn btn-xs btn-default" title="设置为全部章节">全部</button>
         </div>
         <textarea id="bulkInstruction" rows="3" placeholder="修改要求，如：将主角的佩剑统一改名为「霜月」，并补充相关描写"></textarea>
+        <label class="bulk-wb" title="开启后每章修改前还会把本章设定提取到世界书（额外消耗较多 token）。世界书可单独用「读书模式」更新">
+          <input type="checkbox" id="bulkWbSync" /> 同步更新世界书（额外消耗 token）
+        </label>
+        <label class="bulk-wb" title="修改后同步更新向量记忆索引（纯代码计算，不消耗 AI token，用于语义检索补充上下文）">
+          <input type="checkbox" id="bulkMemSync" checked /> 同步向量记忆（不耗 AI token）
+        </label>
         <div class="bulk-actions">
           <button id="btnBulkStart" class="btn btn-sm btn-primary">▶ 开始修改</button>
           <button id="btnBulkStop" class="btn btn-sm btn-warn" disabled>⏹ 停止</button>
@@ -155,14 +161,28 @@
         </div>
       </div>
 
-      <!-- 读书模式 -->
+      <!-- 读书模式 / 小说转世界书 -->
       <div class="section-head">
-        <h3>📖 读书模式</h3>
+        <h3>📚 小说转世界书</h3>
         <button id="btnToggleStudySel" class="btn btn-xs btn-default" title="选取要阅读的章节">📋 选取章节</button>
       </div>
       <div class="study-panel">
+        <div class="study-cats" title="选择要从小说章节中提取的世界书分类（参考分类模板系统）">
+          <div class="study-cats-label">提取分类：</div>
+          <div class="study-cats-list">
+            <label><input type="checkbox" class="study-cat" value="角色" checked /> 角色</label>
+            <label><input type="checkbox" class="study-cat" value="地点" checked /> 地点</label>
+            <label><input type="checkbox" class="study-cat" value="组织" checked /> 组织</label>
+            <label><input type="checkbox" class="study-cat" value="物品" checked /> 物品</label>
+            <label><input type="checkbox" class="study-cat" value="种族" checked /> 种族</label>
+            <label><input type="checkbox" class="study-cat" value="世界观" checked /> 世界观</label>
+            <label><input type="checkbox" class="study-cat" value="剧情" checked /> 剧情</label>
+            <label><input type="checkbox" class="study-cat" value="关系" checked /> 关系</label>
+            <label><input type="checkbox" class="study-cat" value="知识书" checked /> 知识书</label>
+          </div>
+        </div>
         <div class="study-actions">
-          <button id="btnStudyStart" class="btn btn-sm btn-primary" title="AI逐章阅读并自动提取设定">▶ 开始读书</button>
+          <button id="btnStudyStart" class="btn btn-sm btn-primary" title="AI 逐章阅读并按所选分类提取设定，生成世界书">▶ 开始生成</button>
           <button id="btnStudyStop" class="btn btn-sm btn-warn" disabled>⏹ 停止</button>
         </div>
         <div class="study-progress" id="studyProgress" style="display:none">
@@ -299,6 +319,18 @@
       </div>
 
       <div id="tab-summary" class="side-panel">
+        <div class="wb-tpl-bar">
+          <span class="wb-tpl-label">世界书总结模板</span>
+          <select id="wbTemplateSel">
+            <option value="detailed">📖 详细梳理版</option>
+            <option value="concise">📌 简洁版</option>
+            <option value="storyline">🎬 剧情推进版</option>
+          </select>
+        </div>
+        <div class="wb-kw-bar">
+          <input id="wbKwInput" type="text" placeholder="输入实体名/关键词，AI 通读相关章节总结设定…" />
+          <button id="btnWbKw" class="btn btn-xs btn-primary">🧠 总结该设定</button>
+        </div>
         <div id="settingsSummaryBox" class="settings-summary">
           <div class="ss-empty">
             <div class="ss-icon">📖</div>
