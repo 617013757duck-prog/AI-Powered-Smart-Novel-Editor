@@ -15,12 +15,19 @@ class OllamaClient:
         self.model = cfg["ollama"]["model"]
         self.timeout = cfg["ollama"]["timeout"]
         self.default_temp = cfg["ollama"]["temperature"]
+        self._model_override = None
 
     def _refresh_config(self):
         cfg = load_config()
         self.base_url = cfg["ollama"]["base_url"].rstrip("/")
-        self.model = cfg["ollama"]["model"]
+        self.model = self._model_override or cfg["ollama"]["model"]
         self.timeout = cfg["ollama"]["timeout"]
+
+    def set_model(self, model: str):
+        """临时覆盖本次使用的模型（用于多模型协作：不同功能使用不同模型）。"""
+        self._model_override = model
+        if hasattr(self, "_cached_model_name"):
+            del self._cached_model_name
 
     def _resolve_model_name(self) -> str:
         """自动将用户输入的简写模型名解析为 Ollama 实际注册的全名。

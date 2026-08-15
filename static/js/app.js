@@ -202,7 +202,7 @@ function bindEvents() {
   // ============== 新增：删除小说 ==============
   document.getElementById("btnDeleteNovel").onclick = deleteNovel;
 
-  // ============== 新增：Agent 各区域自动保存 + 槽位保存/读取 ==============
+  // ============== 新增：Agent 各区域自动保存 + 槽位保存/读取/管理 ==============
   document.querySelectorAll(".slot-save").forEach(btn => {
     btn.onclick = () => saveAgentSlot(btn.dataset.field);
   });
@@ -211,6 +211,35 @@ function bindEvents() {
       if (sel.value) { loadAgentSlot(sel.dataset.field, parseInt(sel.value)); sel.value = ""; }
     };
   });
+  document.querySelectorAll(".slot-manage").forEach(btn => {
+    btn.onclick = () => toggleSlotManage(btn.dataset.field);
+  });
+  document.getElementById("btnAddStyleBlock").onclick = addStyleBlock;
+  // 世界书生成模型选择：变化即保存到全局（跨小说）
+  document.getElementById("wbModelSel").addEventListener("change", () => {
+    const cfg = _agentCfg();
+    cfg.worldbook_model = worldbookModelOverride();
+    saveAgentConfigQuiet(cfg);
+  });
+  // 批量修改模型选择：变化即保存到全局（跨小说）
+  document.getElementById("bulkModelSel").addEventListener("change", () => {
+    const cfg = _agentCfg();
+    cfg.bulk_model = bulkModelOverride();
+    saveAgentConfigQuiet(cfg);
+  });
+  // 文风块列表：事件委托（开关 / 编辑 / 删除）
+  document.getElementById("styleBlocks").addEventListener("click", e => {
+    const el = e.target.closest("[data-sb]");
+    if (!el) return;
+    const id = el.dataset.sb;
+    if (e.target.closest("[data-sb-toggle]")) toggleStyleBlock(id);
+    else if (e.target.closest("[data-sb-edit]")) editStyleBlock(id);
+    else if (e.target.closest("[data-sb-del]")) deleteStyleBlock(id);
+  });
+  // 通用编辑弹窗（文风块 / 槽位）
+  document.getElementById("btnConfirmSlotEdit").onclick = confirmSlotEdit;
+  document.getElementById("btnCancelSlotEdit").onclick = () => closeSlotEdit();
+  document.getElementById("btnCloseSlotEdit").onclick = () => closeSlotEdit();
   // 自动保存：blur 时触发
   const _doAutoSave = () => autoSaveAgentSettings();
   const _markDirty = () => { state._agentDirty = true; };
@@ -1268,6 +1297,7 @@ function getCommonRewritePayload(extra = {}) {
     instruction: document.getElementById("instruction").value.trim() || "请按用户隐含意图润色本段",
     global_prompt: document.getElementById("globalPrompt").value.trim(),
     custom_instruction: document.getElementById("customAgent").value.trim(),
+    style_instruction: buildStyleInstruction(),
     stream: true,
     ...extra
   };
@@ -1374,7 +1404,8 @@ async function doApplyOne(forceIdx = null) {
     paragraphs: targets.map(t => t.text),
     instruction: instruction,
     global_prompt: document.getElementById("globalPrompt").value.trim(),
-    custom_instruction: document.getElementById("customAgent").value.trim()
+    custom_instruction: document.getElementById("customAgent").value.trim(),
+    style_instruction: buildStyleInstruction()
   };
 
   let doneCount = 0;
@@ -1450,7 +1481,8 @@ async function doApplyAll() {
     paragraphs: paragraphs,
     instruction: instruction,
     global_prompt: document.getElementById("globalPrompt").value.trim(),
-    custom_instruction: document.getElementById("customAgent").value.trim()
+    custom_instruction: document.getElementById("customAgent").value.trim(),
+    style_instruction: buildStyleInstruction()
   };
 
   appendProgressLog("info", `启动全章统一改写：AI 将一次通读 ${paragraphs.length} 段后整体修改`);
@@ -1939,102 +1971,318 @@ async function deleteNovel() {
   } catch (e) { toast("删除异常：" + e.message, "error"); }
 }
 
+function _agentCfg() {
+  if (!state.agent) state.agent = { style_blocks: [], slots: [], worldbook_model: {}, bulk_model: {} };
+  return state.agent;
+}
+
 async function loadAgentSettings() {
-  if (!state.novelId) return;
+  // 全局部分：文风块 / 槽位 / 世界书模型 / 批量修改模型（跨小说共享）
   try {
-    const s = await api(`/api/novels/${state.novelId}/agent_settings`, { method: "GET" });
-    document.getElementById("globalPrompt").value = s.global_prompt || "";
-    document.getElementById("customAgent").value = s.custom_agent || "";
-    if (s.last_instruction) {
-      document.getElementById("instruction").value = s.last_instruction || "";
-    }
-    state._agentSettings = s;
-    state._agentDirty = false;
-    // 更新槽位下拉
-    updateSlotSelectors(s.saved_slots || []);
+    const r = await api("/api/agent_config", { method: "GET" });
+    const cfg = r.config || {};
+    state.agent = {
+      style_blocks: cfg.style_blocks || [],
+      slots: cfg.slots || [],
+      worldbook_model: cfg.worldbook_model || {},
+      bulk_model: cfg.bulk_model || {}
+    };
+    renderStyleBlocks();
+    updateSlotSelectors();
+    renderWorldbookModelSel();
+    renderBulkModelSel();
   } catch (e) {
-    state._agentSettings = { saved_slots: [] };
-    updateSlotSelectors([]);
+    state.agent = { style_blocks: [], slots: [], worldbook_model: {}, bulk_model: {} };
+    renderStyleBlocks();
+    updateSlotSelectors();
+  }
+  state._agentDirty = false;
+  // per-novel 部分：全局指令 / 自定义Agent / 最近修改要求（每本小说独立）
+  if (state.novelId) {
+    try {
+      const s = await api(`/api/novels/${state.novelId}/agent_settings`, { method: "GET" });
+      document.getElementById("globalPrompt").value = s.global_prompt || "";
+      document.getElementById("customAgent").value = s.custom_agent || "";
+      if (s.last_instruction) document.getElementById("instruction").value = s.last_instruction;
+    } catch (e) {}
   }
 }
 
 async function autoSaveAgentSettings() {
-  if (!state.novelId) return;
-  const payload = {
-    global_prompt: document.getElementById("globalPrompt").value,
-    custom_agent: document.getElementById("customAgent").value,
-    last_instruction: document.getElementById("instruction").value,
-    saved_slots: (state._agentSettings && state._agentSettings.saved_slots) || []
-  };
+  // per-novel：全局指令 / 自定义Agent / 最近修改要求（每本小说独立）
+  if (state.novelId) {
+    try {
+      await api(`/api/novels/${state.novelId}/agent_settings`, {
+        method: "POST",
+        body: {
+          global_prompt: document.getElementById("globalPrompt").value,
+          custom_agent: document.getElementById("customAgent").value,
+          last_instruction: document.getElementById("instruction").value
+        }
+      });
+    } catch (e) { /* 静默失败 */ }
+  }
+  // 全局：文风块 / 槽位 / 世界书模型（跨小说共享）
+  const cfg = _agentCfg();
   try {
-    const r = await api(`/api/novels/${state.novelId}/agent_settings`, { method: "POST", body: payload });
-    if (r.ok) {
-      state._agentSettings = r.settings;
-      state._agentDirty = false;
-      updateSlotSelectors(r.settings.saved_slots || []);
-      // 短暂显示已保存指示
-      document.querySelectorAll(".auto-save-indicator").forEach(el => { el.style.display = "inline"; });
-      clearTimeout(window.__autosave_indicator);
-      window.__autosave_indicator = setTimeout(() => {
-        document.querySelectorAll(".auto-save-indicator").forEach(el => { el.style.display = "none"; });
-      }, 1500);
-    }
+    const r = await api("/api/agent_config", { method: "POST", body: cfg });
+    if (r.ok) { state.agent = r.config; state._agentDirty = false; showAutoSaveIndicator(); }
   } catch (e) { /* 静默失败 */ }
   // 标记 dirty 以便下次自动保存
   state._agentDirty = true;
 }
 
-function updateSlotSelectors(slots) {
+function showAutoSaveIndicator() {
+  document.querySelectorAll(".auto-save-indicator").forEach(el => { el.style.display = "inline"; });
+  clearTimeout(window.__autosave_indicator);
+  window.__autosave_indicator = setTimeout(() => {
+    document.querySelectorAll(".auto-save-indicator").forEach(el => { el.style.display = "none"; });
+  }, 1500);
+}
+
+function updateSlotSelectors() {
+  const slots = (state.agent && state.agent.slots) || [];
   document.querySelectorAll(".slot-load").forEach(sel => {
     const field = sel.dataset.field;
-    const fieldSlots = (slots || []).filter(s => s.field === field);
+    const fieldSlots = slots.filter(s => s.field === field);
     sel.innerHTML = `<option value="">📂 读取已存（${fieldSlots.length}个）...</option>` +
       fieldSlots.map((s, i) => `<option value="${i}">${escapeHtml(s.label || '槽位' + (i + 1))} (${new Date(s.saved_at * 1000).toLocaleDateString('zh-CN')})</option>`).join("");
   });
 }
 
 async function saveAgentSlot(field) {
-  if (!state.novelId) return toast("请先选择一本小说", "warn");
   const fieldMap = { global: "globalPrompt", agent: "customAgent" };
   const elId = fieldMap[field];
   if (!elId) return;
   const content = document.getElementById(elId).value.trim();
   if (!content) return toast("当前输入区为空，无法保存到槽位", "warn");
-  const label = prompt("给这个槽位起个名字（可选）：", `快照 ${new Date().toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit'})}`);
-  const slot = {
+  const label = prompt("给这个槽位起个名字（可选）：", `快照 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`);
+  if (label === null) return;
+  const cfg = _agentCfg();
+  cfg.slots.push({
+    id: "slot_" + Date.now(),
     field: field,
     content: content,
     label: label || `槽位 ${Date.now() % 100000}`,
     saved_at: Math.floor(Date.now() / 1000)
-  };
-  const settings = state._agentSettings || { saved_slots: [] };
-  if (!settings.saved_slots) settings.saved_slots = [];
-  settings.saved_slots.push(slot);
-  // 最多保留20个槽位
-  if (settings.saved_slots.length > 20) settings.saved_slots = settings.saved_slots.slice(-20);
+  });
+  // 最多保留50个槽位（全局）
+  if (cfg.slots.length > 50) cfg.slots = cfg.slots.slice(-50);
   try {
-    await api(`/api/novels/${state.novelId}/agent_settings`, { method: "POST", body: settings });
-    state._agentSettings = settings;
-    updateSlotSelectors(settings.saved_slots);
-    toast(`✅ 已保存到「${slot.label}」`, "success");
+    const r = await api("/api/agent_config", { method: "POST", body: cfg });
+    state.agent = r.config;
+    updateSlotSelectors();
+    toast(`✅ 已保存到「${label}」（全局跨小说）`, "success");
   } catch (e) { toast("保存失败：" + e.message, "error"); }
 }
 
 async function loadAgentSlot(field, idx) {
-  const settings = state._agentSettings;
-  if (!settings || !settings.saved_slots) return;
-  const fieldSlots = settings.saved_slots.filter(s => s.field === field);
+  const slots = (state.agent && state.agent.slots) || [];
+  const fieldSlots = slots.filter(s => s.field === field);
   if (idx < 0 || idx >= fieldSlots.length) return;
   const slot = fieldSlots[idx];
   const fieldMap = { global: "globalPrompt", agent: "customAgent" };
   const elId = fieldMap[field];
   if (!elId) return;
-  const el = document.getElementById(elId);
   if (confirm(`将「${slot.label}」的内容恢复到此输入区？（当前内容将被覆盖）`)) {
-    el.value = slot.content;
+    document.getElementById(elId).value = slot.content;
     toast(`✅ 已恢复「${slot.label}」`, "success");
     autoSaveAgentSettings();
   }
+}
+
+// ---- 文风要求分块（多个、可开关、同级生效、全局跨小说） ----
+function renderStyleBlocks() {
+  const cfg = _agentCfg();
+  const wrap = document.getElementById("styleBlocks");
+  if (!wrap) return;
+  if (!cfg.style_blocks.length) {
+    wrap.innerHTML = `<div style="font-size:11.5px;color:var(--muted)">暂无文风块，点击「➕ 新增文风块」添加；启用的分块将在每次修改时自动附加。</div>`;
+    return;
+  }
+  wrap.innerHTML = cfg.style_blocks.map((b, i) => `
+    <div data-sb="${escapeHtml(b.id)}" style="display:flex;align-items:center;gap:6px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2, #fafafa)">
+      <label title="启用/停用" style="display:flex;align-items:center;cursor:pointer;flex-shrink:0">
+        <input type="checkbox" data-sb-toggle ${b.enabled ? "checked" : ""}>
+      </label>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:var(--text)">${escapeHtml(b.title || ('文风块' + (i + 1)))} ${b.enabled ? "" : "<span style='color:var(--muted);font-weight:400'>(停用)</span>"}</div>
+        <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml((b.content || '').slice(0, 60))}</div>
+      </div>
+      <button class="btn btn-xs btn-default" data-sb-edit title="编辑">✏️</button>
+      <button class="btn btn-xs btn-default" data-sb-del title="删除" style="color:var(--danger)">🗑️</button>
+    </div>`).join("");
+}
+
+function addStyleBlock() { openSlotEdit({ mode: "style-add", id: null }); }
+function editStyleBlock(id) {
+  const b = ((state.agent && state.agent.style_blocks) || []).find(x => x.id === id);
+  if (!b) return;
+  openSlotEdit({ mode: "style-edit", id, title: b.title, content: b.content });
+}
+function toggleStyleBlock(id) {
+  const cfg = _agentCfg();
+  const b = cfg.style_blocks.find(x => x.id === id);
+  if (b) { b.enabled = !b.enabled; saveAgentConfigQuiet(cfg); }
+}
+async function deleteStyleBlock(id) {
+  const cfg = _agentCfg();
+  const b = cfg.style_blocks.find(x => x.id === id);
+  if (!b) return;
+  if (!confirm(`删除文风块「${b.title || '未命名'}」？`)) return;
+  cfg.style_blocks = cfg.style_blocks.filter(x => x.id !== id);
+  try {
+    const r = await api("/api/agent_config", { method: "POST", body: cfg });
+    state.agent = r.config;
+    renderStyleBlocks();
+    toast("已删除文风块", "success");
+  } catch (e) { toast("删除失败：" + e.message, "error"); }
+}
+async function saveAgentConfigQuiet(cfg) {
+  try {
+    const r = await api("/api/agent_config", { method: "POST", body: cfg });
+    state.agent = r.config;
+    renderStyleBlocks();
+  } catch (e) {}
+}
+
+// ---- 槽位管理（编辑 / 删除） ----
+function toggleSlotManage(field) {
+  const list = document.getElementById("slotManageList");
+  if (list.dataset.field === field && list.style.display !== "none") {
+    list.style.display = "none";
+    return;
+  }
+  renderSlotManageList(field);
+  list.dataset.field = field;
+  list.style.display = "block";
+}
+function renderSlotManageList(field) {
+  const list = document.getElementById("slotManageList");
+  const slots = ((state.agent && state.agent.slots) || []).filter(s => s.field === field);
+  const labels = { global: "全局修改指令", agent: "自定义 Writer Agent" };
+  if (!slots.length) {
+    list.innerHTML = `<div style="font-size:11.5px;color:var(--muted)">「${labels[field] || field}」暂无已存槽位。</div>`;
+    return;
+  }
+  list.innerHTML = `<div style="font-size:11.5px;color:var(--muted);margin-bottom:4px">「${labels[field] || field}」槽位管理（点击编辑/删除）：</div>` +
+    slots.map((s, i) => `
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600">${escapeHtml(s.label || ('槽位' + (i + 1)))}</div>
+          <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml((s.content || '').slice(0, 50))}</div>
+        </div>
+        <button class="btn btn-xs btn-default" onclick="editAgentSlot('${escapeHtml(s.id)}')">✏️</button>
+        <button class="btn btn-xs btn-default" onclick="deleteAgentSlot('${escapeHtml(s.id)}')" style="color:var(--danger)">🗑️</button>
+      </div>`).join("");
+}
+function editAgentSlot(sid) {
+  const s = ((state.agent && state.agent.slots) || []).find(x => x.id === sid);
+  if (!s) return;
+  openSlotEdit({ mode: "slot-edit", id: sid, title: s.label, content: s.content });
+}
+async function deleteAgentSlot(sid) {
+  const cfg = _agentCfg();
+  const s = cfg.slots.find(x => x.id === sid);
+  if (!s) return;
+  if (!confirm(`删除槽位「${s.label || '未命名'}」？`)) return;
+  cfg.slots = cfg.slots.filter(x => x.id !== sid);
+  try {
+    const r = await api("/api/agent_config", { method: "POST", body: cfg });
+    state.agent = r.config;
+    updateSlotSelectors();
+    const list = document.getElementById("slotManageList");
+    if (list.style.display !== "none") renderSlotManageList(list.dataset.field);
+    toast("已删除槽位", "success");
+  } catch (e) { toast("删除失败：" + e.message, "error"); }
+}
+
+// ---- 通用编辑弹窗（文风块 / 槽位） ----
+let _slotEditState = null;
+function openSlotEdit(st) {
+  _slotEditState = st;
+  document.getElementById("slotEditModalTitle").textContent =
+    st.mode === "style-add" ? "➕ 新增文风块" : st.mode === "style-edit" ? "✏️ 编辑文风块" : "✏️ 编辑槽位";
+  document.getElementById("slotEditTitle").value = st.title || "";
+  document.getElementById("slotEditContent").value = st.content || "";
+  document.getElementById("slotEditModal").style.display = "flex";
+}
+function closeSlotEdit() {
+  document.getElementById("slotEditModal").style.display = "none";
+  _slotEditState = null;
+}
+async function confirmSlotEdit() {
+  if (!_slotEditState) return;
+  const title = document.getElementById("slotEditTitle").value.trim();
+  const content = document.getElementById("slotEditContent").value.trim();
+  if (!content) return toast("内容不能为空", "warn");
+  const cfg = _agentCfg();
+  if (_slotEditState.mode === "style-add") {
+    cfg.style_blocks.push({ id: "sb_" + Date.now(), title: title || ("文风块" + (cfg.style_blocks.length + 1)), content, enabled: true });
+  } else if (_slotEditState.mode === "style-edit") {
+    const b = cfg.style_blocks.find(x => x.id === _slotEditState.id);
+    if (b) { b.title = title || b.title; b.content = content; }
+  } else if (_slotEditState.mode === "slot-edit") {
+    const s = cfg.slots.find(x => x.id === _slotEditState.id);
+    if (s) { s.label = title || s.label; s.content = content; }
+  }
+  try {
+    const r = await api("/api/agent_config", { method: "POST", body: cfg });
+    state.agent = r.config;
+    renderStyleBlocks();
+    updateSlotSelectors();
+    closeSlotEdit();
+    toast("✅ 已保存（全局跨小说）", "success");
+  } catch (e) { toast("保存失败：" + e.message, "error"); }
+}
+
+// ---- 拼装启用的文风要求（注入到修改请求，多个分块同级生效） ----
+function buildStyleInstruction() {
+  const blocks = ((state.agent && state.agent.style_blocks) || []).filter(b => b.enabled);
+  if (!blocks.length) return "";
+  return blocks.map((b, i) => `【文风要求${i + 1}】${b.title ? `《${b.title}》` : ""}\n${b.content}`).join("\n\n---\n\n");
+}
+
+// ---- 模型下拉（多模型协作：世界书生成 / 批量修改正文 可选用与单章修改不同的模型） ----
+function _renderModelSel(selId, saved) {
+  const sel = document.getElementById(selId);
+  if (!sel) return;
+  saved = saved || {};
+  api("/api/ai/model_options", { method: "GET" }).then(r => {
+    if (!r || !r.ok) return;
+    const curLabel = r.provider === "external" ? "外部API" : "本地Ollama";
+    let html = `<option value="">沿用当前模型（${curLabel}）</option>`;
+    (r.local_models || []).forEach(m => {
+      html += `<option value="local:${m}" ${saved.provider === "local" && saved.model === m ? "selected" : ""}>本地 Ollama · ${m}</option>`;
+    });
+    (r.external_slots || []).forEach(s => {
+      html += `<option value="external:${s.slot}" ${saved.provider === "external" && saved.slot === s.slot ? "selected" : ""}>外部 API · ${s.label}（${s.model}）</option>`;
+    });
+    sel.innerHTML = html;
+  }).catch(() => {});
+}
+function _modelOverrideFromSel(selId) {
+  const sel = document.getElementById(selId);
+  if (!sel || !sel.value) return {};
+  const idx = sel.value.indexOf(":");
+  if (idx < 0) return {};
+  const provider = sel.value.slice(0, idx);
+  const target = sel.value.slice(idx + 1);
+  if (provider === "local") return { provider: "local", model: target };
+  if (provider === "external") return { provider: "external", slot: target };
+  return {};
+}
+function renderWorldbookModelSel() {
+  _renderModelSel("wbModelSel", (state.agent && state.agent.worldbook_model) || {});
+}
+function worldbookModelOverride() {
+  return _modelOverrideFromSel("wbModelSel");
+}
+function renderBulkModelSel() {
+  _renderModelSel("bulkModelSel", (state.agent && state.agent.bulk_model) || {});
+}
+function bulkModelOverride() {
+  return _modelOverrideFromSel("bulkModelSel");
 }
 
 // ============================================================
@@ -2100,7 +2348,7 @@ async function startStudy() {
 
   try {
     const cats = Array.from(document.querySelectorAll(".study-cat:checked")).map(c => c.value);
-    const payload = { chapters: state.study.selectedChapters, template: state.wbTemplate, categories: cats };
+    const payload = { chapters: state.study.selectedChapters, template: state.wbTemplate, categories: cats, model_override: worldbookModelOverride() };
     const r = await api(`/api/novels/${state.novelId}/study/start`, { method: "POST", body: payload });
     if (!r.ok) {
       if (r.message) { toast(r.message, "warn"); return; }
@@ -2111,7 +2359,7 @@ async function startStudy() {
     document.getElementById("btnStudyStop").disabled = false;
     document.getElementById("studyProgress").style.display = "block";
     document.getElementById("studyInfo").textContent = "启动中...";
-    toast(`小说转世界书已启动：AI 将逐章阅读并按所选分类提取设定（${cats.length} 类）`, "success");
+    toast(`小说转世界书已启动：AI 将分批阅读（每批累积 ≥1 万字）并按所选分类提取设定（${cats.length} 类）`, "success");
     // 开始轮询进度
     pollStudyStatus();
   } catch (e) { toast("启动读书失败：" + e.message, "error"); }
@@ -2142,7 +2390,7 @@ function pollStudyStatus() {
         const p = r.progress;
         if (p && p.status === "done") {
           updateStudyProgress(p);
-          document.getElementById("studyInfo").textContent = `完成！已阅读 ${p.total} 章`;
+          document.getElementById("studyInfo").textContent = `完成！已阅读 ${p.total} 章，共总结 ${p.batches_done || 0} 批`;
           toast("小说转世界书完成！世界书设定已生成/更新", "success");
           // 自动加载设定摘要
           loadSettingsSummary();
@@ -2170,6 +2418,13 @@ function updateStudyProgress(p) {
   document.getElementById("studyBar").style.width = pct + "%";
   document.getElementById("studyBarText").textContent = pct + "%";
   let info = `${done} / ${total} 章`;
+  if (p.batches_done) info += ` | 已总结 ${p.batches_done} 批`;
+  const results = p.results || [];
+  if (results.length) {
+    const last = results[results.length - 1];
+    if (last.ok) info += ` | 最近批次 +${last.added} 条`;
+    else if (last.error) info += ` | 最近批次失败：${String(last.error).slice(0, 30)}`;
+  }
   if (p.last_chapter && p.last_title) {
     info += ` | 当前：第${p.last_chapter}章《${p.last_title}》`;
   } else if (p.current) {
@@ -2205,7 +2460,7 @@ async function summarizeWorldbookKeyword() {
   btn.textContent = "⏳ 检索并总结中...";
   try {
     const r = await api(`/api/novels/${state.novelId}/worldbook/summarize_keyword`, {
-      method: "POST", body: { keyword: kw, template: state.wbTemplate }
+      method: "POST", body: { keyword: kw, template: state.wbTemplate, model_override: worldbookModelOverride() }
     });
     if (!r.ok) { toast(r.error || "总结失败", "error"); return; }
     if (r.added) toast(`✅ 已总结「${kw}」相关设定 ${r.added} 条并写入世界书`, "success");
@@ -2753,7 +3008,10 @@ async function startBulkModify() {
         sync_worldbook: document.getElementById("bulkWbSync").checked,
         sync_memory: document.getElementById("bulkMemSync").checked,
         global_prompt: document.getElementById("globalPrompt").value.trim(),
-        custom_instruction: document.getElementById("customAgent").value.trim()
+        custom_instruction: document.getElementById("customAgent").value.trim(),
+        style_instruction: buildStyleInstruction(),
+        wb_model_override: worldbookModelOverride(),
+        bulk_model_override: bulkModelOverride()
       }
     });
     if (!r.ok) { toast(r.message || "启动失败", "warn"); return; }
@@ -3002,7 +3260,8 @@ async function confirmRework() {
         chapter_idx: idx,
         instruction: instruction,
         global_prompt: document.getElementById("globalPrompt").value.trim(),
-        custom_instruction: document.getElementById("customAgent").value.trim()
+        custom_instruction: document.getElementById("customAgent").value.trim(),
+        style_instruction: buildStyleInstruction()
       }
     });
     if (r.ok) {

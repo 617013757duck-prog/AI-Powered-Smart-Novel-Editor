@@ -37,6 +37,11 @@ class ExternalAPIClient:
         self.timeout = self._cfg_value(cfg, "timeout") or 120
         self.default_temp = self._cfg_value(cfg, "temperature") or 0.7
         self.enabled = bool(cfg.get("enabled") and self.api_key)
+        self._slot_override = None
+
+    def set_slot(self, slot: str):
+        """临时覆盖本次使用的配置槽位（用于多模型协作：不同功能使用不同槽位）。"""
+        self._slot_override = slot
 
     def _cfg_value(self, ex: dict, key: str, default=None):
         """读取当前生效配置：优先 slots.<active_slot>，缺失字段回退顶层（兼容旧版单槽位配置）。"""
@@ -55,7 +60,7 @@ class ExternalAPIClient:
 
     def _refresh_config(self):
         cfg = load_config().get("external_api", {})
-        self.active_slot = cfg.get("active_slot") or "default"
+        self.active_slot = self._slot_override or cfg.get("active_slot") or "default"
         self.base_url = self._cfg_value(cfg, "base_url", "https://api.openai.com/v1")
         self.api_key = self._cfg_value(cfg, "api_key") or os.getenv("EXTERNAL_API_KEY", "")
         self.model = self._cfg_value(cfg, "model") or "gpt-4o-mini"

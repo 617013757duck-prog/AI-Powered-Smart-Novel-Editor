@@ -36,7 +36,7 @@ sys.path.insert(0, str(ROOT))
 from config.settings import load_config, save_config, DATA_DIR, NOVELS_DIR, DEFAULT_CONFIG
 from core.ollama_client import OllamaClient
 from core.chroma_memory import ChromaMemory
-from core.tri_ai import TriModelAI
+from core.tri_ai import TriModelAI, _sanitize_trigger_keys
 from core.chapter_parser import chapter_to_paragraphs
 from services.novel_service import NovelService
 from services.prompt_service import PromptService
@@ -330,6 +330,87 @@ def api_save_agent_settings(novel_id):
     return jsonify({"ok": True, "settings": merged})
 
 
+# ========== 全局 Agent 配置（文风要求 / 槽位 / 世界书模型，跨小说共享） ==========
+# 注意：全局修改指令、自定义 Writer Agent、底部修改要求 为每本小说独立（存 per-novel agent_settings.json）
+GLOBAL_AGENT_FILE = DATA_DIR / "global_agent.json"
+
+
+def _load_global_agent() -> dict:
+    if GLOBAL_AGENT_FILE.exists():
+        try:
+            with open(GLOBAL_AGENT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {"style_blocks": [], "slots": [], "worldbook_model": {}}
+
+
+def _save_global_agent(data: dict) -> dict:
+    GLOBAL_AGENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(GLOBAL_AGENT_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return data
+
+
+@app.route("/api/agent_config", methods=["GET"])
+def api_get_agent_config():
+    """读取全局 Agent 配置（文风要求 / 槽位 / 世界书模型 / 批量修改模型，跨小说共享）"""
+    data = _load_global_agent()
+    return jsonify({"ok": True, "config": {
+        "style_blocks": data.get("style_blocks") or [],
+        "slots": data.get("slots") or [],
+        "worldbook_model": data.get("worldbook_model") or {},
+        "bulk_model": data.get("bulk_model") or {}
+    }})
+
+
+@app.route("/api/agent_config", methods=["POST"])
+def api_save_agent_config():
+    """保存全局 Agent 配置（全量）"""
+    data = request.json or {}
+    cfg = {
+        "style_blocks": data.get("style_blocks") or [],
+        "slots": data.get("slots") or [],
+        "worldbook_model": data.get("worldbook_model") or {},
+        "bulk_model": data.get("bulk_model") or {},
+    }
+    _save_global_agent(cfg)
+    return jsonify({"ok": True, "config": cfg})
+
+
+@app.route("/api/ai/model_options", methods=["GET"])
+def api_ai_model_options():
+    """返回可用模型选项（多模型协作）：本地 Ollama 模型 + 外部 API 槽位 + 当前默认供应商"""
+    try:
+        ex = load_config().get("external_api", {})
+        slots = []
+        for name, s in (ex.get("slots") or {}).items():
+            slots.append({"slot": name, "label": name,
+                          "model": s.get("model", ""), "base_url": s.get("base_url", "")})
+        if not slots and ex.get("base_url"):
+            slots.append({"slot": "default", "label": "default",
+                          "model": ex.get("model", ""), "base_url": ex.get("base_url", "")})
+        local_models = []
+        try:
+            ollama = OllamaClient()
+            om = ollama.list_models()
+            local_models = [m.get("name") for m in (om.get("models") or [])]
+        except Exception:
+            pass
+        provider = load_config().get("ai_provider", {}).get("provider", "local")
+        return jsonify({
+            "ok": True, "provider": provider,
+            "local_models": local_models,
+            "current_local_model": load_config()["ollama"]["model"],
+            "external_slots": slots,
+            "external_enabled": bool(ex.get("enabled") and ex.get("api_key"))
+        })
+    except Exception as e:
+        return _json_error(f"获取模型列表失败: {e}")
+
+
 @app.route("/api/novels/<novel_id>/toc", methods=["GET"])
 def api_get_toc(novel_id):
     return jsonify(novel_svc.get_toc(novel_id))
@@ -409,6 +490,7 @@ def ai_writer_rewrite():
                 chapter_title=data.get("chapter_title", ""),
                 global_prompt=data.get("global_prompt", ""),
                 custom_instruction=data.get("custom_instruction", ""),
+                style_instruction=data.get("style_instruction", ""),
                 stream=True
             )
             try:
@@ -427,7 +509,8 @@ def ai_writer_rewrite():
         chapter_idx=data.get("chapter_idx"),
         chapter_title=data.get("chapter_title", ""),
         global_prompt=data.get("global_prompt", ""),
-        custom_instruction=data.get("custom_instruction", "")
+        custom_instruction=data.get("custom_instruction", ""),
+        style_instruction=data.get("style_instruction", "")
     )
     return jsonify(res)
 
@@ -444,6 +527,7 @@ def ai_writer_rewrite_batch():
     instruction = data.get("instruction", "")
     global_prompt = data.get("global_prompt", "")
     custom_instruction = data.get("custom_instruction", "")
+    style_instruction = data.get("style_instruction", "")
     chapter_idx = data.get("chapter_idx")
     chapter_title = data.get("chapter_title", "")
 
@@ -482,7 +566,8 @@ def ai_writer_rewrite_batch():
                 original_text=orig_text, instruction=instruction,
                 chapter_idx=chapter_idx, chapter_title=chapter_title,
                 global_prompt=global_prompt,
-                custom_instruction=custom_instruction, stream=True
+                custom_instruction=custom_instruction,
+                style_instruction=style_instruction, stream=True
             )
             buf = ""
             try:
@@ -517,7 +602,8 @@ def ai_writer_rewrite_batch():
                 paragraphs=paragraphs, instruction=instruction,
                 chapter_idx=chapter_idx, chapter_title=chapter_title,
                 global_prompt=global_prompt,
-                custom_instruction=custom_instruction
+                custom_instruction=custom_instruction,
+                style_instruction=style_instruction
             )
 
             if isinstance(unified_result, dict) and "error" in unified_result:
@@ -629,6 +715,7 @@ def api_study_start(novel_id):
     chapter_indices = data.get("chapters")  # None=全部, [1,2,3]=指定章节
     template = data.get("template") or "detailed"  # 世界书总结风格模板
     categories = data.get("categories")  # 要提取的分类名列表；None/空 = 全部启用分类
+    model_override = data.get("model_override") or {}  # 多模型协作：指定世界书生成模型
 
     # 检查是否已在运行
     if novel_id in _study_threads:
@@ -655,9 +742,11 @@ def api_study_start(novel_id):
     stop_event = threading.Event()
     progress = {"novel_id": novel_id, "total": len(target_chapters),
                 "done": 0, "current": 0, "status": "starting",
-                "results": [], "summary": None}
+                "batches_done": 0, "results": [], "summary": None}
 
     _study_threads[novel_id] = {"thread": None, "stop": stop_event, "progress": progress}
+
+    BATCH_CHARS = 10000  # 每次至少累积这么多汉字才做一次梳理总结
 
     def _study_worker():
         progress["status"] = "running"
@@ -667,6 +756,31 @@ def api_study_start(novel_id):
             progress["status"] = "error"
             progress["error"] = f"AI初始化失败: {e}"
             return
+
+        def _flush_batch(batch_start, batch_first_title, batch_last, buf):
+            """把累积的批次内容交给 AI 总结并合并进世界书；返回结果。"""
+            if not buf.strip():
+                return None
+            chapter_idx = batch_start
+            if batch_last and batch_last != batch_start:
+                chapter_title = f"第{batch_start}-{batch_last}章"
+            else:
+                chapter_title = batch_first_title
+            return ai.reviewer_summarize_chapter(
+                chapter_idx=chapter_idx,
+                chapter_title=chapter_title,
+                chapter_content=buf,
+                template=template,
+                categories=categories,
+                max_chars=None,  # 阅读模式不截断，按 ≥10000 汉字整批输入
+                model_override=model_override
+            )
+
+        buffer = ""          # 当前批次累积的章节内容
+        batch_start = None   # 当前批次首章 index
+        batch_first_title = ""
+        batch_last = None    # 当前批次末章 index
+        batches_done = 0
 
         for i, ch in enumerate(target_chapters):
             if stop_event.is_set():
@@ -690,23 +804,47 @@ def api_study_start(novel_id):
             except Exception:
                 pass
 
-            # AI 提取设定（小说转世界书：按启用分类提取）
-            res = ai.reviewer_summarize_chapter(
-                chapter_idx=ch["index"],
-                chapter_title=title,
-                chapter_content=content,
-                template=template,
-                categories=categories
-            )
-            progress["results"].append(res)
+            # 累积章节内容，达到阈值即触发一次梳理总结
+            if not buffer:
+                batch_start = ch["index"]
+                batch_first_title = title
+            buffer += f"\n\n===== 第{ch['index']}章《{title}》 =====\n{content}"
+            batch_last = ch["index"]
+
+            if len(buffer) >= BATCH_CHARS:
+                res = _flush_batch(batch_start, batch_first_title, batch_last, buffer)
+                if res:
+                    progress["results"].append(res)
+                batches_done += 1
+                progress["batches_done"] = batches_done
+                progress["last_chapter"] = batch_last
+                progress["last_title"] = batch_first_title
+                buffer = ""
+                batch_start = None
+                batch_first_title = ""
+                batch_last = None
+
             progress["done"] = i + 1
-            progress["last_chapter"] = ch["index"]
-            progress["last_title"] = title
+
+        # 末尾 flush：剩余不足 BATCH_CHARS 也读完剩余内容
+        if buffer.strip():
+            res = _flush_batch(batch_start, batch_first_title, batch_last, buffer)
+            if res:
+                progress["results"].append(res)
+            batches_done += 1
+            progress["batches_done"] = batches_done
+            progress["last_chapter"] = batch_last
+            progress["last_title"] = batch_first_title
+            buffer = ""
 
         # 全部完成
         if not stop_event.is_set():
             progress["status"] = "done"
+            progress["batches_done"] = batches_done
             progress["summary"] = ai.load_settings_summary()
+        else:
+            progress["status"] = "stopped"
+            progress["batches_done"] = batches_done
 
     t = threading.Thread(target=_study_worker, daemon=True)
     _study_threads[novel_id]["thread"] = t
@@ -782,6 +920,7 @@ def api_worldbook_dedupe(novel_id):
             return jsonify({"ok": True, "book": book, "removed": 0})
         fresh = {"entries": [], "last_chapter": book.get("last_chapter", 0)}
         for e in old_entries:
+            _sanitize_trigger_keys([e], None)  # 清洗字段名/单字等误提取触发词
             ai._merge_worldbook_entries(fresh, [e], 0)
         fresh["last_chapter"] = book.get("last_chapter", 0)
         ai.save_worldbook(fresh)
@@ -868,13 +1007,15 @@ def api_worldbook_extract(novel_id):
     if idx is None:
         return _json_error("请指定章节号")
     template = data.get("template") or "detailed"
+    model_override = data.get("model_override") or {}
     try:
         ch = novel_svc.get_chapter(novel_id, int(idx))
         if not ch:
             return _json_error("章节不存在")
         ai = TriModelAI(novel_id)
         res = ai.reviewer_summarize_chapter(int(idx), ch.get("title", ""),
-                                            ch.get("content", ""), template=template)
+                                            ch.get("content", ""), template=template,
+                                            model_override=model_override)
         return jsonify({"ok": True, "result": res})
     except Exception as e:
         return _json_error(f"提取设定失败: {e}")
@@ -888,6 +1029,7 @@ def api_worldbook_summarize_keyword(novel_id):
     if not keyword:
         return _json_error("请输入关键词/实体名")
     template = data.get("template") or "detailed"
+    model_override = data.get("model_override") or {}
     try:
         # 全文检索：找到含关键词的章节与上下文片段
         results = novel_svc.search_text(novel_id, keyword)
@@ -903,7 +1045,8 @@ def api_worldbook_summarize_keyword(novel_id):
             return jsonify({"ok": True, "message": f"未检索到「{keyword}」相关内容，无法总结", "book": ai.load_worldbook()})
         context_text = "\n\n".join(chunks)[:9000]
         ai = TriModelAI(novel_id)
-        res = ai.summarize_worldbook_keyword(keyword, context_text, template)
+        res = ai.summarize_worldbook_keyword(keyword, context_text, template,
+                                             model_override=model_override)
         if isinstance(res, dict) and res.get("error"):
             return _json_error(res["error"])
         entries = res.get("entries") or []
@@ -1184,6 +1327,7 @@ def api_bulk_start(novel_id):
         "current_keyword": "", "last_chapter": 0, "last_title": "",
         "instruction": instruction, "keywords": keywords, "mode": mode,
         "sync_worldbook": sync_worldbook,
+        "wb_model_override": data.get("wb_model_override") or {},
         "chapter_range": (chapter_range if not isinstance(chapter_range, list)
                           else {"list": [int(x) for x in chapter_range]})
     }
@@ -1191,6 +1335,9 @@ def api_bulk_start(novel_id):
 
     g_prompt = data.get("global_prompt") or ""
     c_instruction = data.get("custom_instruction") or ""
+    s_instruction = data.get("style_instruction") or ""
+    wb_model_override = data.get("wb_model_override") or {}  # 多模型协作：同步世界书用的模型
+    bulk_model_override = data.get("bulk_model_override") or {}  # 多模型协作：批量修改正文用的模型
 
     def _worker():
         progress["status"] = "running"
@@ -1277,24 +1424,26 @@ def api_bulk_start(novel_id):
                             chapter_content=content, keywords=found,
                             instruction=instruction,
                             global_prompt=g_prompt, custom_instruction=c_instruction,
-                            neighbor_context=neighbor_ctx)
+                            style_instruction=s_instruction,
+                            neighbor_context=neighbor_ctx,
+                            model_override=bulk_model_override)
             progress.setdefault("plans", {})[idx] = plan
 
-            # AI 判断本章无需修改则跳过（不进入修改阶段），省时省 token
-            if isinstance(plan, dict) and plan.get("error"):
-                # 规划失败：不进入修改阶段（避免白耗一次全文修改调用），记录错误后继续
-                progress["errors"].append({"chapter": idx, "error": plan["error"]})
+            # AI 判断本章无需修改则跳过（不进入修改阶段，同时不更新世界书/向量记忆），省时省 token
+            if not isinstance(plan, dict) or plan.get("error"):
+                # 规划失败/异常：一律跳过，绝不让跳过章节进入修改与世界书写入
+                if isinstance(plan, dict) and plan.get("error"):
+                    progress["errors"].append({"chapter": idx, "error": plan["error"]})
                 progress["phase"] = f"skipped:{idx}"
                 progress["done"] = i + 1
                 continue
-            if isinstance(plan, dict):
-                need = plan.get("need_modify", True)
-                plan_items = plan.get("plan") or []
-                if not need or not plan_items:
-                    progress["skipped"].append(idx)
-                    progress["phase"] = f"skipped:{idx}"
-                    progress["done"] = i + 1
-                    continue
+            need = plan.get("need_modify", True)
+            plan_items = plan.get("plan") or []
+            if not need or not plan_items:
+                progress["skipped"].append(idx)
+                progress["phase"] = f"skipped:{idx}"
+                progress["done"] = i + 1
+                continue
 
             # 构建关键词上下文片段
             snippets = []
@@ -1330,11 +1479,15 @@ def api_bulk_start(novel_id):
                            chapter_content=content, keyword_contexts=snippets,
                            keywords=found, instruction=instruction,
                            global_prompt=g_prompt, custom_instruction=c_instruction,
+                           style_instruction=s_instruction,
                            already_modified_context=already_ctx,
                            neighbor_context=neighbor_ctx,
-                           modification_plan=plan)
+                           modification_plan=plan,
+                           model_override=bulk_model_override)
             if isinstance(res, dict) and res.get("error"):
                 progress["errors"].append({"chapter": idx, "error": res["error"]})
+                # 修改失败：视为未修改，标记为跳过，避免停留在"修改中"假象
+                progress["phase"] = f"skipped:{idx}"
                 progress["done"] = i + 1
                 continue
 
@@ -1344,31 +1497,37 @@ def api_bulk_start(novel_id):
                 modified, new_title = res
             else:
                 modified = res if isinstance(res, str) else ""
-            if modified and modified.strip() and modified.strip() != content.strip():
-                _bulk_pending.setdefault(novel_id, {})[idx] = {
-                    "original": content,
-                    "modified": modified,
-                    "original_paragraphs": full_ch.get("paragraphs", []),
-                    "modified_paragraphs": chapter_to_paragraphs(modified),
-                    "title": title,
-                    "new_title": new_title,
-                    "keywords": found
-                }
-                # 每修改一章立即更新向量记忆，使后续章节检索到已修改内容（纯代码索引，不耗AI token）
-                if sync_memory:
-                    try:
-                        ai.memory.index_chapter(idx, title, modified)
-                    except Exception:
-                        pass
-                # 可选：仅对实际修改的章节同步提取设定到世界书（默认关闭省 token）
-                if sync_worldbook:
-                    progress["phase"] = f"reading:{idx}"
-                    _ai_call("reviewer_summarize_chapter", idx, title, modified, wb_template, max_attempts=2)
-                modified_records.append({
-                    "chapter": idx, "title": title, "keywords": found,
-                    "snippet": modified[:150]
-                })
-                progress["modified"].append(idx)
+            if not (modified and modified.strip()) or modified.strip() == content.strip():
+                # AI 未产生实质修改（返回空 / 与原文相同）：视为跳过，不进入待确认、不写世界书/向量记忆
+                progress["skipped"].append(idx)
+                progress["phase"] = f"skipped:{idx}"
+                progress["done"] = i + 1
+                continue
+            _bulk_pending.setdefault(novel_id, {})[idx] = {
+                "original": content,
+                "modified": modified,
+                "original_paragraphs": full_ch.get("paragraphs", []),
+                "modified_paragraphs": chapter_to_paragraphs(modified),
+                "title": title,
+                "new_title": new_title,
+                "keywords": found
+            }
+            # 每修改一章立即更新向量记忆，使后续章节检索到已修改内容（纯代码索引，不耗AI token）
+            if sync_memory:
+                try:
+                    ai.memory.index_chapter(idx, title, modified)
+                except Exception:
+                    pass
+            # 可选：仅对实际修改的章节同步提取设定到世界书（默认关闭省 token）
+            if sync_worldbook:
+                progress["phase"] = f"reading:{idx}"
+                _ai_call("reviewer_summarize_chapter", idx, title, modified, wb_template,
+                         max_attempts=2, model_override=wb_model_override)
+            modified_records.append({
+                "chapter": idx, "title": title, "keywords": found,
+                "snippet": modified[:150]
+            })
+            progress["modified"].append(idx)
             progress["done"] = i + 1
             progress["last_chapter"] = idx
             progress["last_title"] = title
@@ -1465,6 +1624,7 @@ def api_bulk_confirm(novel_id):
             return
         pg = (_bulk_threads.get(novel_id, {}).get("progress") or {})
         do_sync_wb = bool(pg.get("sync_worldbook", False))  # 仅在勾选"同步世界书"时才提取设定
+        wb_override = pg.get("wb_model_override") or {}  # 同步世界书用的模型（多模型协作）
         for idx, e in pairs:
             title = e.get("new_title") or e.get("title", "")
             try:
@@ -1473,7 +1633,7 @@ def api_bulk_confirm(novel_id):
                 pass
             if do_sync_wb:
                 try:
-                    a.reviewer_summarize_chapter(idx, title, e["modified"])
+                    a.reviewer_summarize_chapter(idx, title, e["modified"], model_override=wb_override)
                 except Exception:
                     pass
     if confirmed_pairs:
@@ -1592,6 +1752,7 @@ def api_bulk_rework(novel_id):
         keywords=keywords, instruction=instruction,
         global_prompt=(data.get("global_prompt") or ""),
         custom_instruction=(data.get("custom_instruction") or ""),
+        style_instruction=(data.get("style_instruction") or ""),
         already_modified_context=already_ctx
     )
     if isinstance(res, dict) and res.get("error"):

@@ -134,6 +134,12 @@
         <label class="bulk-wb" title="修改后同步更新向量记忆索引（纯代码计算，不消耗 AI token，用于语义检索补充上下文）">
           <input type="checkbox" id="bulkMemSync" checked /> 同步向量记忆（不耗 AI token）
         </label>
+        <div class="bulk-wb" style="display:flex;align-items:center;gap:6px">
+          <span style="flex-shrink:0">🤖 批量修改模型：</span>
+          <select id="bulkModelSel" style="flex:1;font-size:11.5px;padding:3px 5px" title="指定「总体设定修改」的正文修改用哪个模型（含预思考与修改阶段）；单章修改仍用当前选择的模型；「同步世界书」用上方小说转世界书面板的模型">
+            <option value="">沿用当前模型</option>
+          </select>
+        </div>
         <div class="bulk-actions">
           <button id="btnBulkStart" class="btn btn-sm btn-primary">▶ 开始修改</button>
           <button id="btnBulkStop" class="btn btn-sm btn-warn" disabled>⏹ 停止</button>
@@ -180,6 +186,12 @@
             <label><input type="checkbox" class="study-cat" value="关系" checked /> 关系</label>
             <label><input type="checkbox" class="study-cat" value="知识书" checked /> 知识书</label>
           </div>
+        </div>
+        <div class="study-model" style="margin-bottom:8px">
+          <div class="study-cats-label">世界书生成模型（多模型协作）：</div>
+          <select id="wbModelSel" style="width:100%;font-size:11.5px;padding:4px 6px" title="指定「小说转世界书 / 关键词总结 / 批量同步世界书」使用哪个模型，修改正文仍用当前选择的模型">
+            <option value="">沿用当前模型</option>
+          </select>
         </div>
         <div class="study-actions">
           <button id="btnStudyStart" class="btn btn-sm btn-primary" title="AI 逐章阅读并按所选分类提取设定，生成世界书">▶ 开始生成</button>
@@ -275,22 +287,30 @@
 
       <div id="tab-agent" class="side-panel active">
         <div class="field">
-          <label class="field-label">🌐 全局修改指令（每次改写附加）</label>
+          <label class="field-label">🌐 全局修改指令（每次改写附加 · 跨小说）</label>
           <textarea id="globalPrompt" rows="4" placeholder="示例：&#10;• 整体文风偏古风，避免现代词&#10;• 节奏紧凑，删除水字数句&#10;• 保留第一人称叙事视角"></textarea>
-          <div class="field-actions" style="margin-top:4px;display:flex;gap:4px;align-items:center">
-            <button class="btn btn-xs btn-default slot-save" data-field="global">💾 保存到槽位</button>
+          <div class="field-actions" style="margin-top:4px;display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-xs btn-default slot-save" data-field="global">💾 保存槽位</button>
             <select class="slot-load" data-field="global" style="font-size:11px;height:24px;padding:0 6px"><option value="">📂 读取已存...</option></select>
+            <button class="btn btn-xs btn-default slot-manage" data-field="global">🖊️ 管理</button>
             <span class="auto-save-indicator" data-field="global" style="font-size:10px;color:var(--muted);margin-left:4px;display:none">已自动保存</span>
           </div>
         </div>
         <div class="field">
-          <label class="field-label">🎭 自定义 Writer Agent 设定</label>
+          <label class="field-label">🎭 自定义 Writer Agent 设定（跨小说）</label>
           <textarea id="customAgent" rows="3" placeholder="可选：覆盖默认Writer设定，例如：你是一位擅长写权谋文的资深编辑..."></textarea>
-          <div class="field-actions" style="margin-top:4px;display:flex;gap:4px;align-items:center">
-            <button class="btn btn-xs btn-default slot-save" data-field="agent">💾 保存到槽位</button>
+          <div class="field-actions" style="margin-top:4px;display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-xs btn-default slot-save" data-field="agent">💾 保存槽位</button>
             <select class="slot-load" data-field="agent" style="font-size:11px;height:24px;padding:0 6px"><option value="">📂 读取已存...</option></select>
+            <button class="btn btn-xs btn-default slot-manage" data-field="agent">🖊️ 管理</button>
             <span class="auto-save-indicator" data-field="agent" style="font-size:10px;color:var(--muted);margin-left:4px;display:none">已自动保存</span>
           </div>
+        </div>
+        <div class="field">
+          <label class="field-label">✍️ 文风要求（多个分块 · 启用者全部生效 · 全局跨小说）</label>
+          <div id="styleBlocks" style="display:flex;flex-direction:column;gap:6px"></div>
+          <button id="btnAddStyleBlock" class="btn btn-xs btn-default" style="margin-top:6px">➕ 新增文风块</button>
+          <div id="slotManageList" style="margin-top:8px;display:none"></div>
         </div>
         <div class="field">
           <label class="field-label row">
@@ -517,6 +537,29 @@
     <div class="modal-foot">
       <button id="btnCancelRework" class="btn btn-default">取消</button>
       <button id="btnConfirmRework" class="btn btn-primary">开始重新修改</button>
+    </div>
+  </div>
+</div>
+
+<!-- 通用编辑弹窗（文风块 / 槽位 新增与编辑） -->
+<div id="slotEditModal" class="modal" style="display:none;z-index:150">
+  <div class="modal-wrap" style="max-width:520px;width:90vw">
+    <div class="modal-head">
+      <h2 id="slotEditModalTitle">✏️ 编辑</h2>
+      <button id="btnCloseSlotEdit" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body" style="flex-direction:column;gap:12px">
+      <label class="inp">名称
+        <input id="slotEditTitle" type="text" placeholder="给这个分块起个名字（如：古风、权谋、爽文节奏）">
+      </label>
+      <label class="inp">内容
+        <textarea id="slotEditContent" rows="8" placeholder="输入具体内容..." style="min-height:140px"></textarea>
+      </label>
+      <div style="font-size:11.5px;color:var(--muted);line-height:1.6">文风/槽位内容为全局跨小说保存，切换小说后依然生效。</div>
+    </div>
+    <div class="modal-foot">
+      <button id="btnCancelSlotEdit" class="btn btn-default">取消</button>
+      <button id="btnConfirmSlotEdit" class="btn btn-primary">保存</button>
     </div>
   </div>
 </div>
