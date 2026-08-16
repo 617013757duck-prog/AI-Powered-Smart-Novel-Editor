@@ -438,6 +438,32 @@ def api_save_chapter(novel_id, idx):
     return jsonify({"ok": ok})
 
 
+@app.route("/api/novels/<novel_id>/chapters", methods=["POST"])
+def api_chapter_add(novel_id):
+    """新增章节：after=null 追加到末尾；after=章节号 插入到该章之后（后续章节自动顺延）。"""
+    data = request.json or {}
+    after = data.get("after")
+    if after is not None:
+        try:
+            after = int(after)
+        except (TypeError, ValueError):
+            return _json_error("插入位置无效")
+    res = novel_svc.add_chapter(novel_id, after=after, title=data.get("title") or "")
+    if res.get("error"):
+        return _json_error(res["error"])
+    return jsonify({"ok": True, "new_index": res["new_index"], "toc": res["toc"],
+                    "index_warning": res.get("index_warning")})
+
+
+@app.route("/api/novels/<novel_id>/chapters/<int:idx>", methods=["DELETE"])
+def api_chapter_delete(novel_id, idx):
+    """删除章节，后续章节自动前移补位。"""
+    res = novel_svc.delete_chapter(novel_id, idx)
+    if res.get("error"):
+        return _json_error(res["error"])
+    return jsonify({"ok": True, "toc": res["toc"], "index_warning": res.get("index_warning")})
+
+
 @app.route("/api/novels/<novel_id>/chapters/<int:idx>/reindex", methods=["POST"])
 def api_reindex_chapter(novel_id, idx):
     return jsonify(novel_svc.reindex_chapter(novel_id, idx))
@@ -1437,8 +1463,9 @@ def api_bulk_start(novel_id):
                 progress["phase"] = f"skipped:{idx}"
                 progress["done"] = i + 1
                 continue
-            need = plan.get("need_modify", True)
             plan_items = plan.get("plan") or []
+            # 缺少 need_modify 字段时按 plan 内容保守判断：plan 为空即视为无需修改（默认跳过，避免误改）
+            need = plan.get("need_modify", bool(plan_items))
             if not need or not plan_items:
                 progress["skipped"].append(idx)
                 progress["phase"] = f"skipped:{idx}"

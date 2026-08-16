@@ -53,6 +53,7 @@
 
       <div class="section-head">
         <h3>📑 章节目录</h3>
+        <button id="btnAddChapter" class="btn btn-xs btn-default" title="在末尾追加一个新章节" style="margin-left:auto">➕ 添加章节</button>
       </div>
       <div class="search-wrap">
         <input id="chapterSearch" placeholder="搜索章节标题 / 序号" />
@@ -314,8 +315,8 @@
         </div>
         <div class="field">
           <label class="field-label row">
-            <input type="checkbox" id="autoReview" checked />
-            <span>每次改写后自动运行 Reviewer 审校</span>
+            <input type="checkbox" id="autoReview" />
+            <span>每次改写后自动运行 Reviewer 审校（默认关闭，省 token）</span>
           </label>
         </div>
         <div class="field">

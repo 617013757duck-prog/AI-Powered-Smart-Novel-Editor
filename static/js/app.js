@@ -201,6 +201,8 @@ function bindEvents() {
 
   // ============== 新增：删除小说 ==============
   document.getElementById("btnDeleteNovel").onclick = deleteNovel;
+  // ============== 新增：增删章节（末尾追加） ==============
+  document.getElementById("btnAddChapter").onclick = () => addChapter(null);
 
   // ============== 新增：Agent 各区域自动保存 + 槽位保存/读取/管理 ==============
   document.querySelectorAll(".slot-save").forEach(btn => {
@@ -844,7 +846,10 @@ function renderToc() {
     const div = document.createElement("div");
     const isMod = String(c.title).includes("【已修改】");
     div.className = "toc-item" + (state.chapterIdx === c.index ? " active" : "") + (isMod ? " modified" : "");
-    div.innerHTML = `<span><span class="idx">${String(c.index).padStart(3, "0")}</span>${escapeHtml(c.title)}</span><span class="tag tag-muted">${c.paragraph_count || 0}段</span>`;
+    div.innerHTML = `<span><span class="idx">${String(c.index).padStart(3, "0")}</span>${escapeHtml(c.title)}</span><span class="toc-actions"><span class="tag tag-muted">${c.paragraph_count || 0}段</span><button class="btn btn-xs toc-add" title="在后方插入新章节">➕</button><button class="btn btn-xs btn-warn toc-del" title="删除本章">🗑</button></span>`;
+    // 章节操作按钮：阻止冒泡，避免触发整行点击（加载章节 / 读书模式复选框翻转）
+    div.querySelector(".toc-add").onclick = (e) => { e.stopPropagation(); addChapter(c.index); };
+    div.querySelector(".toc-del").onclick = (e) => { e.stopPropagation(); deleteChapter(c.index); };
     div.onclick = (e) => {
       // 读书模式选取章节中
       if (state.study.showChSel) {
@@ -920,6 +925,58 @@ async function editChapterTitle() {
       toast("修改失败", "error");
     }
   } catch (e) { toast("修改失败：" + e.message, "error"); }
+}
+
+// ====== 新增 / 删除章节（用户自行决定增删，后续章节自动顺延/前移） ======
+async function addChapter(after) {
+  if (!state.novelId) return;
+  const title = prompt(after == null
+    ? "输入新章节标题（留空默认「新章节」，将追加到末尾）："
+    : `输入新章节标题（留空默认「新章节」，将插入到第 ${after} 章之后）：`, "");
+  if (title === null) return;
+  try {
+    const r = await api(`/api/novels/${state.novelId}/chapters`, {
+      method: "POST", body: { after: (after == null ? null : after), title: title.trim() }
+    });
+    if (r.ok) {
+      const oldIdx = state.chapterIdx;
+      refreshToc();
+      refreshNovelList();
+      // 插入在当前打开的章节之前时，当前章节序号已顺延 +1，需重载
+      if (oldIdx && after != null && oldIdx > after) loadChapter(oldIdx + 1);
+      else if (!oldIdx) loadChapter(r.new_index);
+      if (r.index_warning) toast(r.index_warning, "warn");
+      toast(`✅ 已添加第 ${r.new_index} 章`, "success");
+    } else {
+      toast("添加章节失败", "error");
+    }
+  } catch (e) { toast("添加章节失败：" + e.message, "error"); }
+}
+
+async function deleteChapter(idx) {
+  if (!state.novelId) return;
+  if (!confirm(`确定删除第 ${idx} 章吗？\n删除后后续章节序号会自动前移，此操作不可撤销。`)) return;
+  try {
+    const r = await api(`/api/novels/${state.novelId}/chapters/${idx}`, { method: "DELETE" });
+    if (r.ok) {
+      const curIdx = state.chapterIdx;
+      refreshToc();
+      refreshNovelList();
+      if (curIdx === idx) {
+        // 删除的是当前章节：切换到剩余第一章（或清空）
+        const toc = r.toc || [];
+        if (toc.length) loadChapter(toc[0].index);
+        else { state.chapter = null; state.chapterIdx = null; buildCardsFromChapter(); renderDiffView(); }
+      } else if (curIdx > idx) {
+        // 当前章节在删除位置之后，序号已前移 -1
+        loadChapter(curIdx - 1);
+      }
+      if (r.index_warning) toast(r.index_warning, "warn");
+      toast(`✅ 已删除第 ${idx} 章`, "success");
+    } else {
+      toast("删除章节失败", "error");
+    }
+  } catch (e) { toast("删除章节失败：" + e.message, "error"); }
 }
 
 function buildCardsFromChapter() {

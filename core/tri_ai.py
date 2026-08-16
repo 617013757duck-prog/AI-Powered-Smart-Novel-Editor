@@ -788,7 +788,7 @@ class TriModelAI:
 
 要求：
 - 严格判断：只有当本章确实存在与修改要求/已整理设定相关的、需要调整的内容时才输出 need_modify=true；若本章内容已符合要求或与修改主题无关，必须输出 need_modify=false 且 plan 为空，避免无意义的修改消耗
-- plan 只列真正需要修改的 1-5 个点；无法确定本章是否要改时再取 need_modify=true
+- plan 只列真正需要修改的 1-5 个点；无法确定本章是否要改时取 need_modify=false（宁可不改也不误改，避免浪费 token 与破坏原文）
 - 修改必须符合已整理设定，不OOC
 - 只输出JSON，禁止其他内容"""
 
@@ -806,7 +806,8 @@ class TriModelAI:
                 data = json.loads(content[start:end])
                 data.setdefault("plan", [])
                 data.setdefault("focus", "")
-                data.setdefault("need_modify", True)
+                # 缺少 need_modify 字段时按 plan 内容保守判断：plan 为空即视为无需修改（默认跳过，避免误改）
+                data.setdefault("need_modify", bool(data.get("plan")))
                 return data
         except (json.JSONDecodeError, KeyError) as e:
             return {"error": f"JSON解析失败: {e}", "raw": content[:150]}

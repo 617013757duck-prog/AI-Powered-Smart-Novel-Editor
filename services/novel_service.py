@@ -294,6 +294,164 @@ class NovelService:
                 msg = "ChromaDB/SentenceTransformer 未安装。请先执行 安装依赖.bat 后再使用向量记忆功能。"
             return {"ok": False, "error": msg}
 
+    def add_chapter(self, novel_id: str, after: Optional[int] = None,
+                    title: str = "") -> Dict:
+        """新增章节：在指定章节之后插入（after=None 追加到末尾）。
+        后续章节 index 依次 +1 并重排文件，返回 {"ok","new_index","toc","index_warning"}。"""
+        toc = self.get_toc(novel_id)
+        if not toc:
+            return {"error": "章节目录为空"}
+        toc = sorted(toc, key=lambda c: c["index"])
+        indices = [c["index"] for c in toc]
+        if after is None:
+            new_index = max(indices) + 1
+        else:
+            after = int(after)
+            if after not in indices:
+                return {"error": "指定的插入位置章节不存在"}
+            new_index = after + 1
+        new_title = (title or "").strip() or "新章节"
+        chapters_dir = self.base_dir / novel_id / "chapters"
+
+        # 插入到中间：后续章节 index 全部 +1（从大到小重命名，避免覆盖）
+        for c in sorted([x for x in toc if x["index"] >= new_index],
+                        key=lambda x: x["index"], reverse=True):
+            old_idx, new_idx = c["index"], c["index"] + 1
+            old_file = chapters_dir / f"chapter_{old_idx:05d}.json"
+            new_file = chapters_dir / f"chapter_{new_idx:05d}.json"
+            if not old_file.exists():
+                continue
+            try:
+                with open(old_file, "r", encoding="utf-8") as f:
+                    ch_data = json.load(f)
+                ch_data["index"] = new_idx
+                with open(new_file, "w", encoding="utf-8") as f:
+                    json.dump(ch_data, f, ensure_ascii=False, separators=(",", ":"))
+                old_file.unlink()
+            except Exception as e:
+                return {"error": f"章节重排失败：{str(e)}"}
+
+        # 写入新章节文件（空内容，由用户自行编辑）
+        new_ch = {
+            "index": new_index,
+            "title": new_title,
+            "content": "",
+            "paragraphs": [],
+            "modified_content": "",
+            "modified_paragraphs": []
+        }
+        try:
+            with open(chapters_dir / f"chapter_{new_index:05d}.json", "w", encoding="utf-8") as f:
+                json.dump(new_ch, f, ensure_ascii=False, separators=(",", ":"))
+        except Exception as e:
+            return {"error": f"创建章节失败：{str(e)}"}
+
+        result = self._rebuild_toc_and_meta(novel_id)
+        if result.get("error"):
+            return result
+        return {"ok": True, "new_index": new_index, "toc": result["toc"],
+                "index_warning": result.get("index_warning")}
+
+    def delete_chapter(self, novel_id: str, chapter_idx: int) -> Dict:
+        """删除指定章节，后续章节 index 依次 -1 并重排文件。
+        返回 {"ok","toc","index_warning"}。"""
+        chapter_idx = int(chapter_idx)
+        toc = self.get_toc(novel_id)
+        if not toc:
+            return {"error": "章节目录为空"}
+        if chapter_idx not in [c["index"] for c in toc]:
+            return {"error": "章节不存在"}
+        chapters_dir = self.base_dir / novel_id / "chapters"
+
+        # 删除目标章节文件
+        target_file = chapters_dir / f"chapter_{chapter_idx:05d}.json"
+        if target_file.exists():
+            try:
+                target_file.unlink()
+            except Exception as e:
+                return {"error": f"删除章节失败：{str(e)}"}
+
+        # 后续章节 index 全部 -1（从小到大重命名，避免覆盖）
+        for c in sorted([x for x in toc if x["index"] > chapter_idx],
+                        key=lambda x: x["index"]):
+            old_idx, new_idx = c["index"], c["index"] - 1
+            old_file = chapters_dir / f"chapter_{old_idx:05d}.json"
+            new_file = chapters_dir / f"chapter_{new_idx:05d}.json"
+            if not old_file.exists():
+                continue
+            try:
+                with open(old_file, "r", encoding="utf-8") as f:
+                    ch_data = json.load(f)
+                ch_data["index"] = new_idx
+                with open(new_file, "w", encoding="utf-8") as f:
+                    json.dump(ch_data, f, ensure_ascii=False, separators=(",", ":"))
+                old_file.unlink()
+            except Exception as e:
+                return {"error": f"章节重排失败：{str(e)}"}
+
+        result = self._rebuild_toc_and_meta(novel_id)
+        if result.get("error"):
+            return result
+        return {"ok": True, "toc": result["toc"],
+                "index_warning": result.get("index_warning")}
+
+    def _rebuild_toc_and_meta(self, novel_id: str) -> Dict:
+        """按章节文件重建 toc.json / novel_meta.json，并尝试重建向量索引。
+        索引失败仅返回 index_warning，不阻断章节增删。返回 {"toc":[...],"index_warning":...}。"""
+        chapters_dir = self.base_dir / novel_id / "chapters"
+        chapters, toc = [], []
+        for f in sorted(chapters_dir.glob("chapter_*.json")):
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    d = json.load(fh)
+                chapters.append(d)
+                toc.append({
+                    "index": d.get("index", 0),
+                    "title": d.get("title", ""),
+                    "paragraph_count": len(d.get("paragraphs") or [])
+                })
+            except Exception as e:
+                return {"error": f"读取章节文件失败：{str(e)}"}
+        toc = sorted(toc, key=lambda x: x["index"])
+        if not toc:
+            return {"error": "章节目录为空"}
+
+        toc_path = self.base_dir / novel_id / "toc.json"
+        try:
+            toc_path.write_text(json.dumps(toc, ensure_ascii=False, indent=2), "utf-8")
+        except Exception as e:
+            return {"error": f"更新目录失败：{str(e)}"}
+
+        meta = self.get_novel_meta(novel_id) or {}
+        meta["chapters"] = len(toc)
+        try:
+            (self.base_dir / novel_id / META_FILE).write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+        except Exception:
+            pass
+
+        # 尝试重建向量索引（失败仅记录警告，不阻断）
+        index_warning = None
+        try:
+            mem = ChromaMemory(novel_id)
+            mem.reset()
+            for ch in chapters:
+                mem.index_chapter(ch["index"], ch.get("title", ""),
+                                  ch.get("modified_content") or ch.get("content") or "",
+                                  total_chapters=len(toc))
+            meta["indexed"] = True
+            (self.base_dir / novel_id / META_FILE).write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+        except Exception as e:
+            msg = str(e)
+            if "chromadb" in msg.lower() or "module not found" in msg.lower():
+                msg = "向量索引未构建（ChromaDB/SentenceTransformer 未安装）。章节增删已完成，安装依赖后可手动重索引。"
+            else:
+                msg = f"向量索引重建失败：{msg}。章节增删已完成，可稍后通过「重索引」重试。"
+            index_warning = msg
+        return {"toc": toc, "index_warning": index_warning}
+
+
     def export_novel(self, novel_id: str, use_modified: bool = True) -> str:
         toc = self.get_toc(novel_id)
         meta = self.get_novel_meta(novel_id) or {}
