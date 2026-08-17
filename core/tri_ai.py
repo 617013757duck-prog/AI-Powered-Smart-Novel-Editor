@@ -211,6 +211,27 @@ class TriModelAI:
             self.ollama.set_model(model)
         return self.ollama
 
+    def _generate_with_retry(self, prompt: str, system: str = "",
+                             temperature: Optional[float] = None,
+                             max_attempts: int = 3) -> dict:
+        """非流式 AI 调用带退避重试：连接类错误（网络波动/超时/无法连接）等待后自动重试，
+        与批量修改的 _ai_call 行为对齐，避免单次波动即报"连接不上"。"""
+        res = {}
+        for attempt in range(1, max_attempts + 1):
+            client = self._get_ai_client()
+            res = client.generate(prompt=prompt, system=system,
+                                  temperature=temperature, stream=False)
+            if not (isinstance(res, dict) and res.get("error")):
+                return res
+            err = str(res["error"])
+            is_conn = ("无法连接" in err or "请求超时" in err or "Connection" in err
+                       or "timed out" in err.lower() or "ReadTimeout" in err)
+            if is_conn and attempt < max_attempts:
+                time.sleep(6 * attempt)
+                continue
+            return res
+        return res
+
     # ========== 世界书（Worldbook）设定系统 ==========
     # 世界书条目 = 一段设定 + 触发关键词。AI 修改内容时按关键词命中读取对应条目，
     # 类似酒馆等 AI 聊天平台的 Lorebook 机制。用户可以自行编辑条目的触发词与内容。
@@ -699,13 +720,7 @@ class TriModelAI:
 【待修改文本（共{para_count}段，以 ===分段=== 分隔）】
 {combined}"""
 
-        client = self._get_ai_client()
-        res = client.generate(
-            prompt=user_prompt,
-            system=WRITER_SYSTEM_FULL_CONTEXT,
-            temperature=self.writer_temp,
-            stream=False
-        )
+        res = self._generate_with_retry(user_prompt, WRITER_SYSTEM_FULL_CONTEXT, self.writer_temp)
         content = (res or {}).get("content", "")
         if res and res.get("error"):
             return {"error": res["error"]}
@@ -751,13 +766,17 @@ class TriModelAI:
 【原文】
 {original_text}"""
 
-        client = self._get_ai_client()
-        return client.generate(
-            prompt=user_prompt,
-            system=WRITER_SYSTEM_FULL_CONTEXT,
-            temperature=self.writer_temp,
-            stream=stream
-        )
+        if stream:
+            # 流式（SSE）：保持实时输出，不重试
+            client = self._get_ai_client()
+            return client.generate(
+                prompt=user_prompt,
+                system=WRITER_SYSTEM_FULL_CONTEXT,
+                temperature=self.writer_temp,
+                stream=True
+            )
+        # 非流式：带连接重试，避免单次网络波动即报"连接不上"
+        return self._generate_with_retry(user_prompt, WRITER_SYSTEM_FULL_CONTEXT, self.writer_temp)
 
     def plan_chapter_modification(self, chapter_idx: int, chapter_title: str,
                                   chapter_content: str, keywords: Optional[list] = None,

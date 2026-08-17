@@ -26,7 +26,7 @@ DEFAULT_CONFIG = {
         "base_url": "https://api.openai.com/v1",
         "api_key": "",
         "model": "gpt-4o-mini",
-        "timeout": 120,
+        "timeout": 180,
         "temperature": 0.7
     },
     "ai_provider": {
