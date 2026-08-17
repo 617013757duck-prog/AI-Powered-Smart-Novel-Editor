@@ -485,7 +485,9 @@ class TriModelAI:
 【章节内容】
 {content_part}
 
-请严格按JSON格式输出新出现或被重申的新设定条目。只提取新的，不重复已有条目。"""
+请严格按JSON格式输出新出现或被重申的新设定条目。只提取新的，不重复已有条目。
+- 若本章没有需要新增或更新的设定，直接输出 {{"entries": [], "summary": "本章无新设定"}}，不要硬凑条目
+- 输出前自我检查（只做检查，不要输出检查过程）：1) category 必须属于本次提取分类；2) keys 必须全部是章节原文实际出现的名称/别名/称号，严禁字段名或JSON结构词；3) 格式必须严格JSON且无任何多余文字。"""
 
         FORMAT_REMIND = _WORLDBOOK_FORMAT_REMIND
 
@@ -542,6 +544,8 @@ class TriModelAI:
 - category 自动判断：角色/种族/物品/世界观/剧情/关系
 - keys 必须包含该实体的所有名称、别名、称号
 - content 严格按角色结构与总分结构要求整理
+- 若检索内容中找不到「{keyword}」的直接设定，输出 {{"entries": []}}，不要臆造
+- 输出前自我检查（只做检查，不要输出检查过程）：category 自动判断合理、keys 全部来自原文、格式严格JSON且无任何多余文字
 - 只输出JSON，禁止其他内容"""
 
         for attempt in range(3):
@@ -578,14 +582,24 @@ class TriModelAI:
         match_text：用于关键词触发世界书的完整章节文本（默认回退到 current_text）。
                    避免关键词只出现在章节中后段时漏读相关世界书设定。
         """
-        parts = []
+        # ===== 静态区（跨章/跨请求不变，置于最上方以提升前缀缓存命中率）=====
+        static_parts = []
+        if global_prompt:
+            static_parts.append(f"🌐 【全局修改要求】\n{global_prompt}")
+        if custom_instruction:
+            static_parts.append(f"🎭 【自定义Agent设定】\n{custom_instruction}")
+        if style_instruction:
+            static_parts.append(f"✍️ 【文风要求】\n{style_instruction}")
+
+        # ===== 动态区（每章变化，置于静态区之后）=====
+        dynamic_parts = []
 
         # 0. 当前章节信息（让 AI 明确知道正在修改哪一章、章节名叫什么）
         if chapter_idx is not None:
             if chapter_title:
-                parts.append(f"【当前修改章节】第{chapter_idx}章《{chapter_title}》")
+                dynamic_parts.append(f"【当前修改章节】第{chapter_idx}章《{chapter_title}》")
             else:
-                parts.append(f"【当前修改章节】第{chapter_idx}章")
+                dynamic_parts.append(f"【当前修改章节】第{chapter_idx}章")
 
         # 1. 世界书：关键词触发读取（正文中出现触发词才注入对应设定）
         book = self.load_worldbook()
@@ -597,7 +611,7 @@ class TriModelAI:
                 keys = "、".join(e.get("keys", []) or [])
                 lines.append(f"▸ [{e.get('category', '其他')}] {e.get('name', '')}（触发词：{keys}）")
                 lines.append(f"   {e.get('content', '')[:180]}")
-            parts.append("\n".join(lines))
+            dynamic_parts.append("\n".join(lines))
 
         # 2. 向量记忆
         if chapter_idx is not None:
@@ -613,15 +627,13 @@ class TriModelAI:
                         f"[第{meta.get('chapter_idx','?')}章《{meta.get('chapter_title','')}》|"
                         f"相关度{r.get('score','?')}]\n{r.get('content','')[:180]}"
                     )
-                parts.append("\n\n".join(mem_lines))
+                dynamic_parts.append("\n\n".join(mem_lines))
 
-        # 3. 全局要求 + 自定义Agent + 文风要求
-        if global_prompt:
-            parts.insert(0, f"🌐 【全局修改要求】\n{global_prompt}")
-        if custom_instruction:
-            parts.insert(0, f"🎭 【自定义Agent设定】\n{custom_instruction}")
-        if style_instruction:
-            parts.insert(0, f"✍️ 【文风要求】\n{style_instruction}")
+        parts = static_parts + dynamic_parts
+        if parts:
+            # 权威快照声明：注入的设定/记忆为当前权威，取代更早信息，防止模型臆测与冲突
+            parts.append("【权威参考】以上注入的世界书设定与相关记忆段落为本章修改的当前权威快照"
+                         "（取代更早的记忆）；修改时以此为准，不臆测原文没有的信息。")
 
         return "\n\n===\n\n".join(parts) if parts else ""
 
@@ -672,19 +684,20 @@ class TriModelAI:
             style_instruction=style_instruction
         )
 
-        user_prompt = f"""{full_context}
-
-【修改指令】
+        user_prompt = f"""【修改指令】
 {instruction}
 
-【待修改文本（共{para_count}段，以 ===分段=== 分隔）】
-{combined}
-
 重要输出要求：
-1. 你需要一次阅读以上所有段落和上下文，通盘理解后再整体改写，确保前后一致、没有OOC。
+1. 你需要一次阅读后面给出的上下文与全部段落，通盘理解后再整体改写，确保前后一致、没有OOC。
 2. 改写后可以用 ===分段=== 分隔输出。你可以根据需要适当拆分过长段落、合并过短段落、或新增过渡段落，让内容更自然流畅。
 3. 输出段落数量不做严格限制，以内容质量为优先。但不要添加解释性文字。
-4. 如果某段不需要改，请保持原段落输出。禁止跳过、省略任何段落。{self._rename_instruction()}"""
+4. 如果某段不需要改，请保持原段落输出。禁止跳过、省略任何段落。{self._rename_instruction()}
+
+【上下文】
+{full_context}
+
+【待修改文本（共{para_count}段，以 ===分段=== 分隔）】
+{combined}"""
 
         client = self._get_ai_client()
         res = client.generate(
@@ -727,15 +740,16 @@ class TriModelAI:
             style_instruction=style_instruction
         )
 
-        user_prompt = f"""{full_context}
-
-【当前修改指令】
+        user_prompt = f"""【当前修改指令】
 {instruction}
 
-【原文】
-{original_text}
+请按修改指令对原文进行改写，直接输出修改后的完整文本。章节标题不在本任务范围内，禁止输出【新章节名】标记。
 
-请按修改指令对原文进行改写，直接输出修改后的完整文本。章节标题不在本任务范围内，禁止输出【新章节名】标记。"""
+【上下文】
+{full_context}
+
+【原文】
+{original_text}"""
 
         client = self._get_ai_client()
         return client.generate(
@@ -774,23 +788,42 @@ class TriModelAI:
         if neighbor_context:
             neighbor_block = f"【前后章节上下文（用于保证设定衔接一致，避免疏漏）】\n{neighbor_context}\n"
 
-        prompt = f"""【当前章节】第{chapter_idx}章《{chapter_title}》
-{neighbor_block}【命中关键词】{kw_list or "（无，全章节模式由AI自行判断）"}
-【修改要求】{instruction}
-{("【文风要求】" + style_instruction) if style_instruction else ""}
-【已命中设定】
-{settings_block}
-【章节全文】
-{chapter_content[:6000]}
+        prompt = f"""任务：通读本章与已整理设定，判断本章是否需要修改，并预思考需要修改的内容与方式，使修改符合全书设定。
 
-请先通读本章与已整理设定，判断本章是否需要修改，并预思考需要修改哪些内容、如何修改，以保证修改后的内容符合全书设定。严格输出JSON：
+【修改要求】（整批统一，判断本章是否需改的唯一依据）
+{instruction}
+{("【文风要求】" + style_instruction) if style_instruction else ""}
+
+【权威优先级】（低优先级规则只能细化、绝不能推翻高优先级要求）
+1. 修改要求：判断与执行的唯一依据
+2. 已命中设定：本章内容必须与之保持一致，不OOC、不设定冲突
+3. 文风要求：仅用于统一措辞风格
+若下方注入信息与你记忆中的信息冲突，一律以下方注入内容为准，不要臆测原文没有的信息。
+
+【输出】（严格只输出下面这一个JSON对象，严禁多余文字、代码块或推理过程）：
 {{"need_modify": true, "plan":[{{"target":"要修改的对象或位置","change":"具体如何修改"}}],"focus":"本章修改重点（一句话）"}}
 
-要求：
-- 严格判断：只有当本章确实存在与修改要求/已整理设定相关的、需要调整的内容时才输出 need_modify=true；若本章内容已符合要求或与修改主题无关，必须输出 need_modify=false 且 plan 为空，避免无意义的修改消耗
-- plan 只列真正需要修改的 1-5 个点；无法确定本章是否要改时取 need_modify=false（宁可不改也不误改，避免浪费 token 与破坏原文）
-- 修改必须符合已整理设定，不OOC
-- 只输出JSON，禁止其他内容"""
+判定标准（按顺序检查后输出）：
+1. 本章内容与「修改要求」是否直接相关？（关键词命中 ≠ 内容相关）
+   - 完全无关 → 必须输出 need_modify=false，plan 为空数组 []
+2. 相关但已符合要求 → 必须输出 need_modify=false，plan 为空数组 []
+3. 相关且确实需要调整 → need_modify=true，plan 只列 1-3 个真实修改点
+4. 无法确定是否相关或是否需改 → need_modify=false（宁可不改也不误改）
+
+⚠️ 严重警告：当本章内容与修改要求无关时，严禁硬改并编造不存在的细节（如凭空让角色拔出光剑、凭空增加打斗场景），这会被判定为破坏原文的严重错误。宁可不改，绝不要编造；plan 修改点宁少勿多。
+
+示例：
+- 修改要求「把主角的武器改为光剑」，本章仍在用旧武器 → {{"need_modify": true, "plan":[{{"target":"第3段武器描写","change":"改为光剑并保持设定一致"}}],"focus":"更新武器为光剑"}}
+- 修改要求「增加打斗细节」，本章是纯文戏且无需调整 → {{"need_modify": false, "plan": [], "focus": ""}}
+
+输出前自我检查（只做检查，不要输出检查过程）：1) plan 为空则 need_modify 必须为 false；2) need_modify=false 则 plan 必须为空数组；3) 内容与要求无关时必须 false；4) 只输出上述JSON对象。
+
+【当前章节】第{chapter_idx}章《{chapter_title}》
+【命中关键词】{kw_list or "（无，全章节模式由AI自行判断）"}
+【已命中设定】
+{settings_block}
+{neighbor_block}【章节全文】
+{chapter_content[:6000]}"""
 
         client = self._get_ai_client(**(model_override or {}))
         res = client.generate(prompt=prompt,
@@ -876,27 +909,29 @@ class TriModelAI:
 【本章预思考修改重点】
 {modification_plan.get('focus','')}"""
 
-        user_prompt = f"""{full_context}{already_block}{neighbor_block}{plan_block}
+        user_prompt = f"""【修改要求】（整批统一，处理各章均以此为准）
+{instruction}
+
+【硬性要求】（必须全部遵守）
+1. 只修改需要变化的内容，其余内容保持原样；未涉及的内容一字不改
+2. 保持原章节的段落结构与叙事风格
+3. 直接输出修改后的完整章节全文，禁止JSON包裹、禁止添加任何解释文字、禁止输出推理过程
+4. 修改必须忠实于既有设定，避免OOC（角色崩坏）和设定冲突；下方注入的世界书设定/相关记忆段落为当前权威快照（取代更早记忆），与记忆冲突时以注入内容为准，不要臆测原文没有的信息
+5. 若「已修改章节回顾」非空，必须与前面章节已修改的设定、措辞保持一致，不得重复冗杂
+6. 若提供了「前后章节上下文」，必须与前一章结尾、后一章开头自然衔接，不重复、不冲突
+7. 若提供了「预思考修改方案」，严格按方案执行修改点{self._rename_instruction()}
+8. 精简输出：删除冗余修饰与废话填充，不添加原文没有的设定、不做无必要扩写，以节省token
+
+【上下文与本章内容】
+{full_context}{already_block}{neighbor_block}{plan_block}
 
 【本次修改章节】第{chapter_idx}章《{chapter_title}》
 【检索关键词】{kw_list}
 【关键词出现的上下文】
 {kw_text}
 
-【修改要求】
-{instruction}
-
 【章节全文】
-{chapter_content}
-
-请基于检索到的上下文与修改要求，对本章进行相应修改。硬性要求：
-1. 只修改需要变化的内容，其余内容保持原样
-2. 保持原章节的段落结构与叙事风格
-3. 直接输出修改后的完整章节全文，禁止JSON包裹、禁止添加任何解释文字
-4. 修改必须忠实于既有设定，避免OOC（角色崩坏）和设定冲突
-5. 若「已修改章节回顾」非空，必须与前面章节已修改的设定、措辞保持一致，不得重复冗杂
-6. 若提供了「前后章节上下文」，必须与前一章结尾、后一章开头自然衔接，不重复、不冲突
-7. 若提供了「预思考修改方案」，严格按方案执行修改点{self._rename_instruction()}"""
+{chapter_content}"""
 
         client = self._get_ai_client(**(model_override or {}))
         res = client.generate(prompt=user_prompt, system=WRITER_SYSTEM_FULL_CONTEXT,
@@ -1037,7 +1072,8 @@ def _has_form_marker(s: str) -> bool:
 _WORLDBOOK_FORMAT_REMIND = (
     "\n\n【重要】必须严格输出一个JSON对象：{\"entries\":[{\"category\":...,\"name\":...,"
     "\"keys\":[...],\"content\":...,\"first_appearance\":...}]}，entries 必须是数组；"
-    "严禁输出数组顶层、编号对象（如 {\"1\":{...}}）、代码块或任何JSON以外的文字。"
+    "严禁输出数组顶层、编号对象（如 {\"1\":{...}}）、代码块、推理过程、检查过程或任何JSON以外的文字；"
+    "若无可提取的新设定，entries 输出空数组。"
 )
 
 
